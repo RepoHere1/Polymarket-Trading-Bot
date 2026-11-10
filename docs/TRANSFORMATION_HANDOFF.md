@@ -9,7 +9,7 @@ Read section 0 before touching anything.
 2. **LIVE stays OFF.** Keep `ENABLE_LIVE_TRADING` unset or not `true` in `.env` until Step F is complete and approved.
 3. **No fake fills.** Do not add `Math.random`, `setTimeout` latency, synthetic slippage, or fallback prices. If real data is missing, throw and refuse.
 4. **No secrets in output or git.** Credentials live in `.env` and `D:\master.env`, both gitignored. Never print values.
-5. **Rotate exposed credentials.** The six scratch files `test_keys.js`, `test_matrix.js`, `test_new.js`, `test_raw.js`, `test_sdk.js`, `test_sdk2.js` hold hardcoded Polymarket US credentials. Their key was printed in a session log, so rotate it at polymarket.us/developer, then delete the files. They are now gitignored.
+5. **No key rotation.** Owner decision 2026-11-10: forget the exposure concern permanently. The Polymarket US API keys (`POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE`) are the account's trading keys, already in `D:\master.env` and `.env`. Never print values, never commit them. The scratch files that hardcoded copies were deleted 2026-11-10.
 6. **Install with dev deps.** `NODE_ENV=production` drops `typescript`, `vitest`, `tsx`, and `eslint`. Use `npm install --include=dev`.
 7. **Line endings are CRLF.** Keep them.
 8. **Rebuild and restart the bot after code changes.** Paper balances are in memory, so a restart resets them. Done 2026-11-10: old process (PID 13936) stopped; restarted via `start_bot.ps1` (PAPER mode, PID 10936) on the transformed build `e9241f0`. Expect a new PID after the next restart.
@@ -28,8 +28,8 @@ One engine, two execution modes:
 - CLOB `GET /fee-rate?token_id=` returns `{"base_fee": N}`. It does NOT return `fee_rate` or `fee_exponent`. The old parser read fields that never exist, so fees were always zero.
 - Taker fee: `fee = C × feeRate × (p × (1 − p))^exponent`, in USDC, rounded to 5 decimals. Makers pay no fee. Use `feeSchedule.rate` and `exponent` from Gamma. Confirm what `base_fee` means before using it.
 - Confirmed live 2026-11-10 (Step D): crypto markets return `feeType: "crypto_fees_v2"` with `feeSchedule { rate: 0.07, exponent: 1, takerOnly: true, rebateRate: 0.2 }`; politics markets use rate 0.04, exponent 1. Check: 100 shares @ $0.50 → 100 × 0.07 × (0.5 × 0.5)^1 = $1.75, matching the documented crypto table and the `takerFeeUsdc()` test vector. `takerOnly: true` means taker fills pay — every PAPER fill crosses the book as a taker, so the fee always applies; makers pay 0. Gamma's `makerBaseFee`/`takerBaseFee` (e.g. 1000) are NOT the fee-rate fields and are ignored, as is CLOB `/fee-rate` `base_fee`.
-- The `polymarket-us` npm package uses a separate market catalog. A slug that Gamma serves returns `NotFound` there. Do not use it for this bot's markets.
-- No EVM signing library is installed (no `ethers`, `viem`, or `@noble/curves`). LIVE needs one.
+- The `polymarket-us` npm package (v0.1.1, deps `@noble/ed25519` + `ws`) is the WRONG source for this bot's market catalog (a slug that Gamma serves returns `NotFound` there), but it is the RIGHT client for polyUSA account + orders: `client.orders.create()`, `client.portfolio`, `client.account`, typed errors, WebSockets.
+- CORRECTED 2026-11-10: no EVM signing library is needed and none will be installed. polyUSA LIVE auth = API keys created by the owner at polymarket.us/developer (already in `D:\master.env` / `.env`), Ed25519 signature over `timestamp + method + path` using the base64-decoded secret (first 32 bytes), `X-PM-Access-Key` header family, base `https://api.polymarket.us`. This was proven working by the scratch auth probes (200s on `/me`, balances, positions) before they were deleted.
 
 ## 3. Current state
 
@@ -50,9 +50,12 @@ Done 2026-11-10 (second pass — Steps A, B, C, D, E, G):
 
 
 
+Corrected 2026-11-10 (third pass — credentials model):
+- The LIVE model is polyUSA API keys, NOT an EVM wallet. Credentials already exist: `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE` in `D:\master.env` and `.env`. The `polymarket-us@0.1.1` SDK is already a dependency (`@noble/ed25519`, `ws`). Owner cancelled the key-rotation task permanently; the scratch credential probes (`test_*.js`, `find_fees.ts`) were deleted.
+
 ## 4. Remaining work, in order
 
-**Status 2026-11-10: A ✅ · B ✅ · C ✅ · D ✅ · E ✅ (labeled as estimate) · G ✅ — only F remains, and it is blocked on owner input. Ops: bot restarted onto the new build (PID 10936, PAPER mode, `start_bot.ps1`); the phantom paper balances were reset by the restart, as intended.**
+**Status 2026-11-10: A ✅ · B ✅ · C ✅ · D ✅ · E ✅ (labeled as estimate) · G ✅ — only F remains. F is now correctly specced (polyUSA SDK; credentials on hand; nothing left to install) but still requires the owner's explicit go-ahead before any real order is sent. Ops: bot restarted onto the new build (PID 10936, PAPER mode, `start_bot.ps1`); phantom paper balances were reset by the restart, as intended.**
 
 Each step needs its own test before the next one starts.
 
@@ -66,13 +69,12 @@ Each step needs its own test before the next one starts.
 
 **Step E: Copy-trade delay.** ✅ DONE (labeled as estimate). `copySimDelaySeconds` in `config.yaml` is never used, and the copy-trade simulator is the same kind of theatre. Either wire it to the real trade timestamp and the book at that time, or label it as an estimate in the dashboard. Do not present it as a result. — It is now labeled "Copy-Trade Estimate / offline replay — not live fills" across the dashboard, config, types, and README. `copySimDelaySeconds` still only documents an assumption; wiring real delayed fills needs book history we do not store.
 
-**Step F: LIVE execution (blocked on owner input).** ❌ NOT STARTED. Requires:
-1. The Polymarket account's wallet private key, supplied by the owner through `.env`. Never in code or chat.
-2. An EVM signing library added with `npm install`, such as `ethers` or `viem`.
-3. The CLOB L1 auth flow: `POST /auth/derive-api-key` with an EIP-712 `ClobAuth` signature, to get the L2 API key, secret, and passphrase.
-4. Order EIP-712 signing against the CTF Exchange domain, then `POST /order`. Verify the domain, struct, and side encoding in the official docs before signing anything.
-5. L2 HMAC headers (`POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, `POLY_API_KEY`, `POLY_PASSPHRASE`). The signature is `HMAC-SHA256(base64Decode(secret), timestamp + method + path + body)`, output as URL-safe base64.
-6. A dry run that signs without sending, then one tiny live order only after explicit owner approval.
+**Step F: LIVE execution (awaiting owner go-ahead; credentials and SDK already in place).** ❌ NOT STARTED. The earlier EVM/EIP-712/HMAC spec was WRONG — that is the international CLOB model; this account is polyUSA. Actual plan:
+1. Credentials: already present — `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE` in `.env` and `D:\master.env` (owner-created at polymarket.us/developer). Nothing to install or supply.
+2. Client: the already-installed `polymarket-us@0.1.1` SDK (deps `@noble/ed25519`, `ws`). Auth proven by the scratch probes: Ed25519 sign of `timestamp + method + path`, base64 secret decoded to a 32-byte seed, `X-PM-Access-Key` header family, base `https://api.polymarket.us`.
+3. Implement `src/wallets/polymarket_wallet.ts` on `new PolymarketUS({ keyId, secretKey }).orders.create(CreateOrderParams)`. Map side/price/size from the bot's order type; keep the same risk engine and `ENABLE_LIVE_TRADING` gate.
+4. Dry run: authenticate and validate an order without submitting (SDK validation or sign-only path); confirm balances via `client.portfolio`.
+5. ONE tiny live order only after explicit owner approval. No EVM library, no EIP-712, no HMAC — do not reintroduce them.
 
 **Step G: Dashboard and cleanup.** ✅ DONE. Remove the remaining "simulated" labels, "copy-trade simulator" wording, and fake-fill text across `dashboard_server.ts` and `README.md`. Confirm no `Math.random` in `src/paper_trading` or `src/wallets`.
 
@@ -85,7 +87,7 @@ Each step needs its own test before the next one starts.
 - LIVE cannot place orders. This is intentional.
 - The whale scanner may be stuck. Its first batch hadn't finished after about 16 minutes, and `marketsPerScan: 50` doesn't cap the loop.
 - `dashboard_server.ts` is about 257 KB in one file. Split it before major changes.
-- `find_fees.ts` and the `test_*.js` scratch files are leftovers. Delete them after rotating the exposed key.
+- RESOLVED 2026-11-10: owner cancelled the rotation permanently (keys are the polyUSA account keys in `D:\master.env`; exposure concern dropped). `find_fees.ts` (tracked; removed via git rm) and the six `test_*.js` probes (untracked) deleted. Credentials now live only in `.env` / `D:\master.env`.
 - RESOLVED 2026-11-10 14:03: the bot was restarted onto the new build (old PID 13936 stopped, new PID 10936 via `start_bot.ps1`, PAPER mode, LIVE wallet refused as designed). Verified from live logs: ~292 markets skipped per poll for missing real two-sided quotes (Step C active), `PAPER SELL rejected: no shares held` (honest wallets — the phantom-cash arb is gone), dashboard returns 200 and serves the "Copy-Trade Estimate" wording.
 
 ## 6. How to verify

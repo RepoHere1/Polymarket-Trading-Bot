@@ -3,8 +3,9 @@ import { logger } from '../reporting/logs';
 
 /**
  * LIVE wallet. Fails closed: it does NOT sign or submit orders yet.
- * Real CLOB submission needs an EIP-712 signer key and an L2 HMAC client,
- * neither of which is configured. Until then every LIVE order is rejected loudly.
+ * Real submission is polyUSA: POLYMARKET_API_KEY/SECRET/PASSPHRASE via the
+ * installed polymarket-us SDK (Ed25519-signed requests). Not wired yet — until
+ * then every LIVE order is rejected loudly.
  */
 export class PolymarketWallet {
   private state: WalletState;
