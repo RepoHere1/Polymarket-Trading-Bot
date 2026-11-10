@@ -80,6 +80,7 @@ Each step needs its own test before the next one starts.
 
 - Exit fills do NOT call `notifyFill` (pre-existing engine behavior, kept intentionally). Momentum and copy-trade strategies ignore SELL fills by design, but the spread strategy's inventory is not decremented when an exit SELL fills — track as future work.
 - The engine depth check (Step B) adds one CLOB `/book` fetch per entry order. Batch or cache if it becomes hot.
+- Gamma pagination terminates via a 422: the `/markets` endpoint rejects deep offsets (observed at offset 2100), so every poll logs one `Gamma API page request failed` ERROR (status 422, offset 2100) and completes with ~1,807 markets over 21 pages. Pre-existing behavior — the page loop breaks on failure — not a Step C regression. If coverage beyond ~2,100 markets is ever needed, switch to a keyset/date filter instead of offset paging.
 
 - LIVE cannot place orders. This is intentional.
 - The whale scanner may be stuck. Its first batch hadn't finished after about 16 minutes, and `marketsPerScan: 50` doesn't cap the loop.
