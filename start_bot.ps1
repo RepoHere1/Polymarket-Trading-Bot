@@ -45,7 +45,8 @@ if ($Live) {
 Write-Host "POLYMARKET_API_KEY set: $([bool]$env:POLYMARKET_API_KEY)"
 Write-Host "OPENROUTER_API_KEY set:   $([bool]$env:OPENROUTER_API_KEY)"
 Write-Host "POLYGON_RPC set:         $([bool]$env:POLYGON_RPC)"
-Write-Host "Dashboard: http://localhost:$($env:DASHBOARD_PORT ?? 3000)/dashboard"
+$dp = if ($env:DASHBOARD_PORT) { $env:DASHBOARD_PORT } else { "3000" }
+Write-Host "Dashboard: http://localhost:$dp/dashboard"
 Write-Host ""
 
 node dist/cli.js start --config $Config
