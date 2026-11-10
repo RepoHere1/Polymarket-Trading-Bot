@@ -12,7 +12,7 @@ Read section 0 before touching anything.
 5. **Rotate exposed credentials.** The six scratch files `test_keys.js`, `test_matrix.js`, `test_new.js`, `test_raw.js`, `test_sdk.js`, `test_sdk2.js` hold hardcoded Polymarket US credentials. Their key was printed in a session log, so rotate it at polymarket.us/developer, then delete the files. They are now gitignored.
 6. **Install with dev deps.** `NODE_ENV=production` drops `typescript`, `vitest`, `tsx`, and `eslint`. Use `npm install --include=dev`.
 7. **Line endings are CRLF.** Keep them.
-8. **The running bot (PID 13936) uses old code.** Rebuild and restart after changes. Paper balances are in memory, so a restart resets them.
+8. **Rebuild and restart the bot after code changes.** Paper balances are in memory, so a restart resets them. Done 2026-11-10: old process (PID 13936) stopped; restarted via `start_bot.ps1` (PAPER mode, PID 10936) on the transformed build `e9241f0`. Expect a new PID after the next restart.
 
 ## 1. Target behavior
 
@@ -52,7 +52,7 @@ Done 2026-11-10 (second pass — Steps A, B, C, D, E, G):
 
 ## 4. Remaining work, in order
 
-**Status 2026-11-10: A ✅ · B ✅ · C ✅ · D ✅ · E ✅ (labeled as estimate) · G ✅ — only F remains, and it is blocked on owner input.**
+**Status 2026-11-10: A ✅ · B ✅ · C ✅ · D ✅ · E ✅ (labeled as estimate) · G ✅ — only F remains, and it is blocked on owner input. Ops: bot restarted onto the new build (PID 10936, PAPER mode, `start_bot.ps1`); the phantom paper balances were reset by the restart, as intended.**
 
 Each step needs its own test before the next one starts.
 
@@ -85,7 +85,7 @@ Each step needs its own test before the next one starts.
 - The whale scanner may be stuck. Its first batch hadn't finished after about 16 minutes, and `marketsPerScan: 50` doesn't cap the loop.
 - `dashboard_server.ts` is about 257 KB in one file. Split it before major changes.
 - `find_fees.ts` and the `test_*.js` scratch files are leftovers. Delete them after rotating the exposed key.
-- The running bot (PID 13936) still runs the old simulator until restarted.
+- RESOLVED 2026-11-10 14:03: the bot was restarted onto the new build (old PID 13936 stopped, new PID 10936 via `start_bot.ps1`, PAPER mode, LIVE wallet refused as designed). Verified from live logs: ~292 markets skipped per poll for missing real two-sided quotes (Step C active), `PAPER SELL rejected: no shares held` (honest wallets — the phantom-cash arb is gone), dashboard returns 200 and serves the "Copy-Trade Estimate" wording.
 
 ## 6. How to verify
 
