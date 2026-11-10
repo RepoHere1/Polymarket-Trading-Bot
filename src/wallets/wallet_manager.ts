@@ -1,10 +1,11 @@
-import { PaperWallet } from './paper_wallet';
+import { PaperWallet, PaperMarketData } from './paper_wallet';
 import { PolymarketWallet } from './polymarket_wallet';
 import { WalletState, WalletConfig, TradeRecord } from '../types';
 import { logger } from '../reporting/logs';
 
 import { OrderbookStream } from '../data/orderbook_stream';
 import { ClobFetcher } from '../data/clob_fetcher';
+import { OrderFill } from '../types';
 
 export interface ExecutionWallet {
   getState(): WalletState;
@@ -15,7 +16,7 @@ export interface ExecutionWallet {
     side: 'BUY' | 'SELL';
     price: number;
     size: number;
-  }): Promise<void>;
+  }): Promise<OrderFill | null>;
   updateBalance(delta: number): void;
   /** Optional display name for the dashboard (defaults to walletId) */
   getDisplayName?(): string;
@@ -26,14 +27,22 @@ export interface ExecutionWallet {
 
 export class WalletManager {
   private readonly wallets = new Map<string, ExecutionWallet>();
-  private stream?: OrderbookStream;
-  private clobFetcher?: ClobFetcher;
+  /** Live market-data sources shared by every PAPER wallet. Set before wallets trade. */
+  private marketSources?: PaperMarketData;
 
-  /** Inject real-time dependencies so new PaperWallets can calculate VWAP slippage */
+  /** Inject the live data sources. PAPER wallets read them lazily, so order does not matter. */
   setPaperDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void {
-    this.stream = stream;
-    this.clobFetcher = clobFetcher;
-    logger.info('WalletManager configured with live data dependencies for paper trading VWAP');
+    this.marketSources = { stream, clobFetcher };
+    logger.info('WalletManager connected PAPER wallets to live CLOB book data');
+  }
+
+  private marketData(): PaperMarketData | undefined {
+    return this.marketSources;
+  }
+
+  /** Build a PAPER wallet wired to the shared live market data (used by the dashboard). */
+  createPaperWallet(config: WalletConfig, assignedStrategy: string): PaperWallet {
+    return new PaperWallet(config, assignedStrategy, () => this.marketData());
   }
 
   registerWallet(config: WalletConfig, assignedStrategy: string, enableLive: boolean): void {
@@ -52,7 +61,7 @@ export class WalletManager {
     const wallet =
       config.mode === 'LIVE'
         ? new PolymarketWallet(config, assignedStrategy)
-        : new PaperWallet(config, assignedStrategy, this.stream, this.clobFetcher);
+        : new PaperWallet(config, assignedStrategy, () => this.marketData());
 
     this.wallets.set(config.id, wallet);
     const state = wallet.getState();

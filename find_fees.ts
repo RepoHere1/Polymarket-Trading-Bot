@@ -21,7 +21,7 @@ async function findFeeMarkets() {
                 found++;
                 if (found >= 5) break;
             }
-        } catch (e) {
+        } catch {
             // Ignore fetch errors
         }
     }

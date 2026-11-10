@@ -136,15 +136,6 @@ class Semaphore {
 }
 
 /* ── Performance timer helper ── */
-interface PerfMetrics {
-  marketsPerSecond: number;
-  tradesPerSecond: number;
-  avgFetchLatencyMs: number;
-  totalFetches: number;
-  totalTradesFetched: number;
-  parallelEfficiency: number;  // 0-1: actual vs theoretical throughput
-}
-
 /* ── TTL Cache for market metadata ── */
 class MarketCache {
   private cache = new Map<string, { data: GammaMarket; expiresAt: number }>();
@@ -711,11 +702,6 @@ export class WhaleScanner {
         const concurrency = this.scannerConfig.parallelFetchBatch || 8;
         this.state.currentMarket = `Scanning ${newMarkets.length} markets (${concurrency}x parallel)…`;
 
-        /* Track completed count for live progress updates */
-        let completedInPage = 0;
-        let errorsInPage = 0;
-        let lastPageError: unknown = null;
-
         const processMarket = async (market: GammaMarket): Promise<number> => {
           if (this.state.status !== 'scanning') return 0;
           await this.semaphore.acquire();
@@ -725,7 +711,6 @@ export class WhaleScanner {
             this.aggregateTrades(this.globalAgg, trades, market.conditionId, market.question, currentPrices);
 
             /* ── Live progress: update state as each market completes ── */
-            completedInPage++;
             marketsProcessedThisBatch++;
             this.state.marketsScanned = marketsProcessedThisBatch;
             this.state.scanProgress = parseFloat(
@@ -735,10 +720,6 @@ export class WhaleScanner {
             this.perfTradesFetched += trades.length;
 
             return trades.length;
-          } catch (err) {
-            errorsInPage++;
-            lastPageError = err;
-            throw err;
           } finally {
             this.semaphore.release();
           }
@@ -1752,9 +1733,9 @@ export class WhaleScanner {
           continue;
         }
         return null;
-      } catch (err: any) {
+      } catch (err: unknown) {
         clearTimeout(timer);
-        if (err?.name === 'AbortError') {
+        if ((err as { name?: string } | null)?.name === 'AbortError') {
           logger.warn({ url, attempt }, 'Scanner fetch timed out after %dms', timeoutMs);
         }
         if (attempt === maxRetries) { logger.error({ err, attempt }, 'Scanner fetch failed'); return null; }
@@ -2186,7 +2167,6 @@ export class WhaleScanner {
    */
   private runCopySimulations(): void {
     const slippageBps = this.scannerConfig.copySimSlippageBps;
-    const delaySeconds = this.scannerConfig.copySimDelaySeconds;
     const topProfiles = this.latestProfiles
       .filter((p) => p.compositeScore >= 50 && p.closedTrades >= 5)
       .slice(0, 20);

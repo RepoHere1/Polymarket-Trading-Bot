@@ -36,7 +36,7 @@ export abstract class BaseStrategy implements StrategyInterface {
    * Per-market cooldown: prevents trading the same market more than once
    * within a cooldown window (default 60 seconds).
    */
-  private tradeCooldowns = new Map<string, number>();
+  protected tradeCooldowns = new Map<string, number>();
   protected cooldownMs = 60_000;
 
   initialize(context: StrategyContext): void {

@@ -1,4 +1,4 @@
-import { BaseStrategy } from '../strategy_interface';
+import { BaseStrategy, StrategyContext } from '../strategy_interface';
 import { Signal, MarketData, OrderRequest } from '../../types';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -95,7 +95,7 @@ export class UserDefinedStrategy extends BaseStrategy {
   private positions: UserPosition[] = [];
 
   /* ── Initialization: merge user config over defaults ─────────── */
-  override initialize(context: { wallet: any; config: Record<string, unknown> }): void {
+  override initialize(context: StrategyContext): void {
     super.initialize(context);
     const userCfg = (context.config ?? {}) as Partial<UserParams>;
     this.params = { ...DEFAULTS, ...userCfg };
@@ -213,7 +213,7 @@ export class UserDefinedStrategy extends BaseStrategy {
     return signals
       .filter((s) => {
         const key = `${s.marketId}:${s.outcome}:${s.side}`;
-        const last = (this as any).tradeCooldowns?.get(key) ?? 0;
+        const last = this.tradeCooldowns.get(key) ?? 0;
         return now - last > this.cooldownMs;
       })
       .map((signal) => {

@@ -1,26 +1,39 @@
-import { WalletConfig, WalletState, Position, TradeRecord, RiskLimits } from '../types';
-import { FillSimulator } from '../paper_trading/fill_simulator';
-import { PnlTracker } from '../paper_trading/pnl_tracker';
-import { logger } from '../reporting/logs';
-import { consoleLog } from '../reporting/console_log';
+﻿import { WalletConfig, WalletState, TradeRecord, RiskLimits, OrderFill } from '../types';
 import { OrderbookStream } from '../data/orderbook_stream';
 import { ClobFetcher } from '../data/clob_fetcher';
+import { matchAgainstBook, takerFeeUsdc } from '../paper_trading/book_matcher';
+import { logger } from '../reporting/logs';
+import { consoleLog } from '../reporting/console_log';
+
+/** Live market-data sources. PAPER fills are matched against these; nothing is simulated. */
+export interface PaperMarketData {
+  stream: OrderbookStream;
+  clobFetcher: ClobFetcher;
+}
+
+export type PaperMarketDataProvider = () => PaperMarketData | undefined;
+
+export interface PaperOrderRequest {
+  marketId: string;
+  outcome: 'YES' | 'NO';
+  side: 'BUY' | 'SELL';
+  price: number;
+  size: number;
+}
+
+const MAX_TRADES = 1000;
 
 export class PaperWallet {
   private state: WalletState;
-  private readonly fillSimulator: FillSimulator;
-  private readonly pnlTracker = new PnlTracker();
   private readonly trades: TradeRecord[] = [];
-  private displayName: string = '';
+  private displayName = '';
+  private orderSeq = 0;
 
   constructor(
     config: WalletConfig,
     assignedStrategy: string,
-    stream?: OrderbookStream,
-    clobFetcher?: ClobFetcher
+    private readonly marketData: PaperMarketDataProvider = () => undefined,
   ) {
-    this.displayName = config.id;
-    this.fillSimulator = new FillSimulator(stream, clobFetcher);
     this.displayName = config.id;
     this.state = {
       walletId: config.id,
@@ -56,178 +69,156 @@ export class PaperWallet {
     return this.displayName;
   }
 
-  setDisplayName(name: string): void {
-    this.displayName = name.trim() || this.state.walletId;
-  }
 
-  updateRiskLimits(limits: Partial<RiskLimits>): void {
-    if (limits.maxPositionSize !== undefined) this.state.riskLimits.maxPositionSize = limits.maxPositionSize;
-    if (limits.maxExposurePerMarket !== undefined) this.state.riskLimits.maxExposurePerMarket = limits.maxExposurePerMarket;
-    if (limits.maxDailyLoss !== undefined) this.state.riskLimits.maxDailyLoss = limits.maxDailyLoss;
-    if (limits.maxOpenTrades !== undefined) this.state.riskLimits.maxOpenTrades = limits.maxOpenTrades;
-    if (limits.maxDrawdown !== undefined) this.state.riskLimits.maxDrawdown = limits.maxDrawdown;
-    logger.info({ walletId: this.state.walletId, riskLimits: this.state.riskLimits }, 'Risk limits updated');
-  }
-
-  async placeOrder(request: {
-    marketId: string;
-    outcome: 'YES' | 'NO';
-    side: 'BUY' | 'SELL';
-    price: number;
-    size: number;
-  }): Promise<void> {
-    const fill = await this.fillSimulator.simulate(request);
-
-    // Capture entry price BEFORE applyFill mutates the position
-    // (on full close, applyFill resets avgPrice to 0)
-    const existingPos = this.state.openPositions.find(
-      (p) => p.marketId === fill.marketId && p.outcome === fill.outcome,
-    );
-    // For an existing position, use cost basis. For a naked SELL (no prior BUY),
-    // entryPrice = 0 so the full proceeds count as realized profit.
-    const entryPrice = existingPos ? existingPos.avgPrice : 0;
-
-    const position = this.applyFill(fill);
-    const pnl = this.pnlTracker.recordFill(fill, position, entryPrice);
-    this.state.realizedPnl += pnl.realized;
-    const cost = fill.price * fill.size * (fill.side === 'BUY' ? 1 : -1);
-    this.state.availableBalance -= cost;
-
-    // Deduct exact USDC execution fees
-    if (fill.feeAsset === 'USDC' && fill.fee > 0) {
-      this.state.availableBalance -= fill.fee;
+  /**
+   * Fill a PAPER order against the live CLOB book.
+   * Returns null when nothing executes (book does not cross, or a SELL with no shares held).
+   * Throws when live market data is missing: it never invents a fill.
+   */
+  async placeOrder(request: PaperOrderRequest): Promise<OrderFill | null> {
+    const walletId = this.state.walletId;
+    const data = this.marketData();
+    if (!data) {
+      throw new Error(`PAPER ${walletId}: market data not connected â€” refusing to simulate a fill`);
+    }
+    const market = data.stream.getMarket(request.marketId);
+    if (!market) {
+      throw new Error(`PAPER ${walletId}: market ${request.marketId} not in live cache â€” refusing to simulate a fill`);
+    }
+    const tokenId = request.outcome === 'YES' ? market.clobTokenIds[0] : market.clobTokenIds[1];
+    if (!tokenId) {
+      throw new Error(`PAPER ${walletId}: no CLOB token for ${request.outcome} on ${request.marketId}`);
+    }
+    const book = await data.clobFetcher.fetchOrderBook(tokenId);
+    if (!book) {
+      throw new Error(`PAPER ${walletId}: CLOB book unavailable for ${tokenId} â€” refusing to simulate a fill`);
     }
 
-    this.trades.push({
-      orderId: fill.orderId,
-      walletId: this.state.walletId,
-      marketId: fill.marketId,
-      outcome: fill.outcome,
-      side: fill.side,
-      price: fill.price,
-      size: fill.size,
-      cost: Math.abs(cost),
-      fee: fill.fee,
-      feeAsset: fill.feeAsset,
-      realizedPnl: pnl.realized,
-      cumulativePnl: this.state.realizedPnl,
-      balanceAfter: this.state.availableBalance,
-      timestamp: fill.timestamp,
+    const pos = this.state.openPositions.find(
+      (p) => p.marketId === request.marketId && p.outcome === request.outcome,
+    );
+    const held = pos?.size ?? 0;
+    // A SELL can only close shares that are actually held. Never mint cash.
+    if (request.side === 'SELL' && held <= 0) {
+      logger.warn({ walletId, marketId: request.marketId }, 'PAPER SELL rejected: no shares held');
+      return null;
+    }
+    const size = request.side === 'SELL' ? Math.min(request.size, held) : request.size;
+
+    const match = matchAgainstBook(book, { side: request.side, limitPrice: request.price, size });
+    if (match.filledSize <= 0) return null;
+
+    const fee = takerFeeUsdc(match.filledSize, match.avgPrice, market.feeRate ?? 0, market.feeExponent ?? 0);
+    if (request.side === 'BUY' && match.notional + fee > this.state.availableBalance) {
+      logger.warn({ walletId, marketId: request.marketId }, 'PAPER BUY rejected: insufficient balance');
+      return null;
+    }
+
+    const realized = this.applyFill(request, pos, match.filledSize, match.avgPrice, match.notional, fee);
+    const timestamp = Date.now();
+    const orderId = `paper-${walletId}-${++this.orderSeq}-${timestamp}`;
+    this.recordTrade({
+      orderId,
+      marketId: request.marketId,
+      outcome: request.outcome,
+      side: request.side,
+      price: match.avgPrice,
+      size: match.filledSize,
+      notional: match.notional,
+      fee,
+      pnl: realized - fee,
+      timestamp,
     });
-
-    const MAX_TRADES = 1000;
-    if (this.trades.length > MAX_TRADES) {
-      this.trades.splice(0, this.trades.length - MAX_TRADES);
-    }
-
-    logger.info(
-      {
-        walletId: this.state.walletId,
-        marketId: fill.marketId,
-        price: fill.price,
-        size: fill.size,
-        fee: fill.fee,
-        feeAsset: fill.feeAsset
-      },
-      `${this.state.walletId} PAPER fill ${fill.side} ${fill.outcome} market=${fill.marketId} price=${fill.price} size=${fill.size} fee=${fill.fee} ${fill.feeAsset}`,
-    );
 
     consoleLog.success(
       'FILL',
-      `[${this.state.walletId}] ${fill.side} ${fill.outcome} ×${fill.size} @ $${fill.price} (Fee: ${fill.fee.toFixed(4)} ${fill.feeAsset}) → PnL $${pnl.realized.toFixed(2)} | Bal $${this.state.availableBalance.toFixed(2)}`,
-      {
-        walletId: this.state.walletId,
-        strategy: this.state.assignedStrategy,
-        orderId: fill.orderId,
-        marketId: fill.marketId,
-        outcome: fill.outcome,
-        side: fill.side,
-        price: fill.price,
-        size: fill.size,
-        cost: Math.abs(cost),
-        fee: fill.fee,
-        feeAsset: fill.feeAsset,
-        realizedPnl: Number(pnl.realized.toFixed(4)),
-        cumulativePnl: Number(this.state.realizedPnl.toFixed(4)),
-        balanceAfter: Number(this.state.availableBalance.toFixed(2)),
-        openPositions: this.state.openPositions.length,
-      }
+      `[${walletId}] ${request.side} ${request.outcome} Ã—${match.filledSize} @ $${match.avgPrice.toFixed(4)} (fee ${fee.toFixed(5)} USDC) â†’ PnL $${(realized - fee).toFixed(4)} | Bal $${this.state.availableBalance.toFixed(2)}`,
+      { walletId, marketId: request.marketId, orderId, unfilled: match.unfilledSize },
     );
+
+    return {
+      orderId,
+      marketId: request.marketId,
+      outcome: request.outcome,
+      side: request.side,
+      price: match.avgPrice,
+      size: match.filledSize,
+      fee,
+      feeAsset: 'USDC',
+      timestamp,
+    };
   }
 
-  private applyFill(fill: {
+  /** Mutates positions and balance. Returns realized gross PnL (before fee). */
+  private applyFill(
+    request: PaperOrderRequest,
+    pos: WalletState['openPositions'][number] | undefined,
+    filledSize: number,
+    avgPrice: number,
+    notional: number,
+    fee: number,
+  ): number {
+    if (request.side === 'BUY') {
+      if (pos) {
+        const newSize = pos.size + filledSize;
+        pos.avgPrice = (pos.avgPrice * pos.size + notional) / newSize;
+        pos.size = newSize;
+      } else {
+        this.state.openPositions.push({
+          marketId: request.marketId,
+          outcome: request.outcome,
+          size: filledSize,
+          avgPrice,
+          realizedPnl: 0,
+        });
+      }
+      this.state.availableBalance -= notional + fee;
+      return 0;
+    }
+
+    // SELL: pos is guaranteed to exist and hold shares (checked by caller)
+    const realized = (avgPrice - (pos as NonNullable<typeof pos>).avgPrice) * filledSize;
+    const held = pos as NonNullable<typeof pos>;
+    held.size -= filledSize;
+    held.realizedPnl += realized;
+    this.state.availableBalance += notional - fee;
+    if (held.size <= 1e-9) {
+      this.state.openPositions = this.state.openPositions.filter((p) => p !== held);
+    }
+    return realized;
+  }
+
+  private recordTrade(t: {
+    orderId: string;
     marketId: string;
     outcome: 'YES' | 'NO';
     side: 'BUY' | 'SELL';
     price: number;
     size: number;
+    notional: number;
     fee: number;
-    feeAsset: 'USDC' | 'SHARES';
-  }): Position {
-    const existing = this.state.openPositions.find(
-      (pos) => pos.marketId === fill.marketId && pos.outcome === fill.outcome,
-    );
-    if (!existing) {
-      if (fill.side === 'SELL') {
-        // Selling without a position — return a phantom position, don't add to state
-        return {
-          marketId: fill.marketId,
-          outcome: fill.outcome,
-          size: 0,
-          avgPrice: fill.price,
-          realizedPnl: 0,
-        };
-      }
-
-      // If opening a new BUY position, deduct the share fee from the acquired size
-      let acquiredSize = fill.size;
-      if (fill.feeAsset === 'SHARES' && fill.fee > 0) {
-        acquiredSize -= fill.fee;
-      }
-
-      const position: Position = {
-        marketId: fill.marketId,
-        outcome: fill.outcome,
-        size: acquiredSize,
-        avgPrice: fill.price,
-        realizedPnl: 0,
-      };
-      this.state.openPositions.push(position);
-      return position;
+    pnl: number;
+    timestamp: number;
+  }): void {
+    this.state.realizedPnl += t.pnl;
+    this.trades.push({
+      orderId: t.orderId,
+      walletId: this.state.walletId,
+      marketId: t.marketId,
+      outcome: t.outcome,
+      side: t.side,
+      price: t.price,
+      size: t.size,
+      cost: t.notional,
+      fee: t.fee,
+      feeAsset: 'USDC',
+      realizedPnl: t.pnl,
+      cumulativePnl: this.state.realizedPnl,
+      balanceAfter: this.state.availableBalance,
+      timestamp: t.timestamp,
+    });
+    if (this.trades.length > MAX_TRADES) {
+      this.trades.splice(0, this.trades.length - MAX_TRADES);
     }
-
-    if (fill.side === 'BUY') {
-      // Adding to position — deduct fee from Acquired Size, update cost basis with weighted average
-      let acquiredSize = fill.size;
-      if (fill.feeAsset === 'SHARES' && fill.fee > 0) {
-        acquiredSize -= fill.fee;
-      }
-
-      const newSize = existing.size + acquiredSize;
-
-      // We calculate avgPrice using the gross fill.price and gross fill.size because 
-      // the user still "paid" for the total fill amount in USDC. The lost shares are the fee.
-      existing.avgPrice =
-        (existing.avgPrice * existing.size + fill.price * fill.size) / newSize;
-      existing.size = newSize;
-    } else {
-      // Reducing / closing position — keep avgPrice (cost basis) unchanged
-      const reduceQty = Math.min(fill.size, existing.size);
-      existing.size -= reduceQty;
-      // If fully closed, reset avgPrice
-      if (existing.size <= 0) {
-        existing.size = 0;
-        existing.avgPrice = 0;
-      }
-      // avgPrice stays the same for partial closes — this is critical for
-      // correct realized PnL: (fillPrice − entryPrice) × qty
-    }
-
-    // Clean up zero-size positions
-    this.state.openPositions = this.state.openPositions.filter(
-      (p) => p.size > 0,
-    );
-
-    return existing;
   }
 }

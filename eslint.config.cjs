@@ -3,8 +3,11 @@ const tsParser = require('@typescript-eslint/parser');
 
 module.exports = [
   {
-    files: ['**/*.ts'],
+    // Global ignores: must be a standalone object (no `files`) to apply to all linted files
     ignores: ['dist/**', 'node_modules/**'],
+  },
+  {
+    files: ['**/*.ts'],
     languageOptions: {
       parser: tsParser,
       parserOptions: {

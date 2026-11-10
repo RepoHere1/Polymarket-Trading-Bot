@@ -21,6 +21,8 @@ interface GammaMarket {
   /** 1-day and 1-week price movements */
   oneDayPriceChange?: number;
   oneWeekPriceChange?: number;
+  feesEnabled?: boolean;
+  feeSchedule?: { rate?: number; exponent?: number };
   /** Nested events array – first entry carries event metadata */
   events?: Array<{
     id?: string;
@@ -65,7 +67,6 @@ export class MarketFetcher {
     let offset = 0;
     const pageSize = MarketFetcher.PAGE_SIZE;
 
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       const url = `${this.gammaApi}/markets?active=true&closed=false&limit=${pageSize}&offset=${offset}&order=volume24hr&ascending=false`;
       const response = await fetch(url);
@@ -147,6 +148,8 @@ export class MarketFetcher {
           seriesSlug: m.events?.[0]?.series?.[0]?.slug ?? undefined,
           oneDayPriceChange: m.oneDayPriceChange ?? undefined,
           oneWeekPriceChange: m.oneWeekPriceChange ?? undefined,
+          feeRate: m.feesEnabled ? (m.feeSchedule?.rate ?? 0) : 0,
+          feeExponent: m.feeSchedule?.exponent ?? 0,
         });
       } catch {
         logger.warn({ marketId: m.id }, 'Skipping unparseable market');

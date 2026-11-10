@@ -1,6 +1,11 @@
-import { WalletConfig, WalletState, TradeRecord } from '../types';
+import { WalletConfig, WalletState, TradeRecord, OrderFill } from '../types';
 import { logger } from '../reporting/logs';
 
+/**
+ * LIVE wallet. Fails closed: it does NOT sign or submit orders yet.
+ * Real CLOB submission needs an EIP-712 signer key and an L2 HMAC client,
+ * neither of which is configured. Until then every LIVE order is rejected loudly.
+ */
 export class PolymarketWallet {
   private state: WalletState;
   private readonly trades: TradeRecord[] = [];
@@ -42,21 +47,13 @@ export class PolymarketWallet {
     side: 'BUY' | 'SELL';
     price: number;
     size: number;
-  }): Promise<void> {
-    const apiKey = process.env.POLYMARKET_API_KEY;
-    if (!apiKey) {
-      logger.warn('POLYMARKET_API_KEY not set; refusing LIVE order');
-      return;
-    }
-
-    logger.info(
-      {
-        walletId: this.state.walletId,
-        marketId: request.marketId,
-        price: request.price,
-        size: request.size,
-      },
-      `LIVE order submitted ${request.side} ${request.outcome} market=${request.marketId} price=${request.price} size=${request.size}`,
+  }): Promise<OrderFill | null> {
+    logger.error(
+      { walletId: this.state.walletId, marketId: request.marketId },
+      'LIVE order rejected: CLOB signing is not implemented. No order was sent.',
+    );
+    throw new Error(
+      `LIVE wallet ${this.state.walletId}: order signing not implemented — no order sent`,
     );
   }
 }

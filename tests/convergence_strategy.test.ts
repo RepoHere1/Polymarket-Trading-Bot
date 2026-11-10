@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { FilteredHighProbConvergenceStrategy } from '../src/strategies/convergence/filtered_high_prob_convergence';
-import { MarketData, ConvergenceConfig, WalletState, Signal } from '../src/types';
+import { MarketData, ConvergenceConfig, WalletState } from '../src/types';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Helpers
@@ -365,34 +365,6 @@ describe('FilteredHighProbConvergence — Setup Score & Sizing', () => {
    3. EXIT RULES — TP, SL, TIME
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 describe('FilteredHighProbConvergence — Exit Rules', () => {
-  function setupWithPosition(
-    entryPrice: number,
-    currentMid: number,
-    hoursAgo: number,
-    cfgOverrides: Partial<ConvergenceConfig> = {},
-  ) {
-    const strategy = createStrategy(cfgOverrides);
-    const market = mkMarket({ midPrice: entryPrice, bid: entryPrice - 0.01, ask: entryPrice + 0.01 });
-    strategy.onMarketUpdate(market);
-    // Feed enough history to pass anti-chasing
-    for (let i = 0; i < 5; i++) {
-      strategy.onMarketUpdate(mkMarket({
-        midPrice: entryPrice,
-        bid: entryPrice - 0.01,
-        ask: entryPrice + 0.01,
-        timestamp: Date.now() - (5 - i) * 60_000,
-      }));
-    }
-    const signals = strategy.generateSignals();
-    if (signals.length > 0) {
-      const orders = strategy.sizePositions(signals);
-      for (const o of orders) strategy.notifyFill(o);
-    }
-    // Now update market to currentMid
-    strategy.onMarketUpdate(mkMarket({ midPrice: currentMid, bid: currentMid - 0.01, ask: currentMid + 0.01 }));
-    return strategy;
-  }
-
   it('tracks managed positions after submitOrders', () => {
     const strategy = createStrategy();
     const market = mkMarket();

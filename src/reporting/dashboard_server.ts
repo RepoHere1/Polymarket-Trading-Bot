@@ -68,7 +68,7 @@ interface StrategyCatalogEntry {
    Wallet Detail Analytics Builder
    Computes comprehensive metrics from wallet state + trade history
    ────────────────────────────────────────────────────────────── */
-import type { WalletState, TradeRecord, Position } from '../types';
+import type { WalletState, TradeRecord } from '../types';
 
 function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPrices?: Map<string, number>) {
   const sorted = [...trades].sort((a, b) => a.timestamp - b.timestamp);
@@ -846,10 +846,10 @@ export class DashboardServer {
         return;
       }
 
-      if (mode === 'LIVE' && process.env.ENABLE_LIVE_TRADING !== 'true') {
+      if (mode === 'LIVE') {
         json(res, 403, {
           ok: false,
-          error: 'LIVE trading is disabled. Set ENABLE_LIVE_TRADING=true to enable.',
+          error: 'LIVE execution is not implemented yet (CLOB order signing pending). Create PAPER wallets only; no order was sent.',
         });
         return;
       }
@@ -866,7 +866,7 @@ export class DashboardServer {
       const maxTrades = Number(body.maxOpenTrades ?? 10);
       const maxDd = Number(body.maxDrawdown ?? 0.2);
 
-      const wallet = new PaperWallet(
+      const wallet = this.walletManager.createPaperWallet(
         {
           id: walletId,
           mode: mode === 'LIVE' ? 'LIVE' : 'PAPER',
@@ -1751,7 +1751,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <div class="form-grid">
       <div class="fg"><label>Wallet ID</label><input id="cw-id" placeholder="e.g. wallet_4"></div>
       <div class="fg"><label>Mode</label>
-        <select id="cw-mode"><option value="PAPER">PAPER (simulated)</option><option value="LIVE">LIVE (real money)</option></select>
+        <select id="cw-mode"><option value="PAPER">PAPER (live book, no real orders)</option><option value="LIVE">LIVE (real money)</option></select>
       </div>
       <div class="fg"><label>Strategy</label><select id="cw-strategy"></select></div>
       <div class="fg"><label>Capital ($)</label><input id="cw-capital" type="number" min="1" value="500" placeholder="500"></div>

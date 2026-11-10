@@ -169,9 +169,7 @@ describe('WhaleScanner — triggerScan (with mock fetch)', () => {
     const trades0 = clobTrades('0xcond_market_0', 3, 8);
     const trades1 = clobTrades('0xcond_market_1', 2, 6);
 
-    let callIndex = 0;
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
-      callIndex++;
       if (url.includes('/markets')) {
         return { ok: true, json: () => Promise.resolve(markets) };
       }

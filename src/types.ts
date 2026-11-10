@@ -87,6 +87,9 @@ export interface MarketData {
   oneDayPriceChange?: number;
   /** 1-week price change reported by Gamma */
   oneWeekPriceChange?: number;
+  /** Gamma fee schedule: taker fee = C × feeRate × (p(1−p))^feeExponent, USDC */
+  feeRate?: number;
+  feeExponent?: number;
 }
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

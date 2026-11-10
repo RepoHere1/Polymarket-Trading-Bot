@@ -17,7 +17,7 @@
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 import { BaseStrategy, StrategyContext } from '../strategy_interface';
-import { Signal, MarketData, OrderRequest, OrderOutcome, OrderSide } from '../../types';
+import { Signal, OrderRequest, OrderOutcome, OrderSide } from '../../types';
 import { logger } from '../../reporting/logs';
 import { consoleLog } from '../../reporting/console_log';
 

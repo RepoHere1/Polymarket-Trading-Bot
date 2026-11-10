@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { CopyTradeStrategy, DEFAULT_COPY_TRADE_CONFIG, CopyTradeConfig } from '../src/strategies/copy_trading/copy_trade_strategy';
-import { MarketData, WalletState, Signal } from '../src/types';
+import { MarketData, WalletState } from '../src/types';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Helpers
@@ -719,15 +719,15 @@ describe('CopyTradeStrategy — Edge Cases', () => {
 
     // Manually add 10001 seen IDs
     for (let i = 0; i < 10_001; i++) {
-      (s as any).seenTradeIds.add(`tx-${i}`);
+      (s as unknown as { seenTradeIds: Set<string> }).seenTradeIds.add(`tx-${i}`);
     }
-    expect((s as any).seenTradeIds.size).toBe(10_001);
+    expect((s as unknown as { seenTradeIds: Set<string> }).seenTradeIds.size).toBe(10_001);
 
     fetchMock.mockResolvedValue({ ok: true, json: async () => [] });
     await s.onTimer();
 
     // Should have been pruned to ~5000
-    expect((s as any).seenTradeIds.size).toBeLessThanOrEqual(5_001);
+    expect((s as unknown as { seenTradeIds: Set<string> }).seenTradeIds.size).toBeLessThanOrEqual(5_001);
   });
 
   it('shuts down cleanly', () => {

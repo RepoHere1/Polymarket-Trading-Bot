@@ -20,6 +20,7 @@
     "commander": "^12.1.0",
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.0",
+    "polymarket-us": "^0.1.1",
     "yaml": "^2.4.5"
   },
   "devDependencies": {

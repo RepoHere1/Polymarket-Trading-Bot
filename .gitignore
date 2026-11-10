@@ -36,6 +36,14 @@ tests/.test_scanner.db
 coverage/
 .nyc_output/
 
+# Scratch files containing hardcoded API credentials (never commit)
+/test_keys.js
+/test_matrix.js
+/test_new.js
+/test_raw.js
+/test_sdk.js
+/test_sdk2.js
+
 # Temp / scratch files
 state3.txt
 sample_logs.txt

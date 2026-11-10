@@ -380,7 +380,7 @@ export class AiForecastStrategy extends BaseStrategy {
     return signals
       .filter((s) => {
         const key = `${s.marketId}:${s.outcome}:${s.side}`;
-        const last = (this as any).tradeCooldowns?.get(key) ?? 0;
+        const last = this.tradeCooldowns.get(key) ?? 0;
         return now - last > this.cooldownMs;
       })
       .map((signal) => {
