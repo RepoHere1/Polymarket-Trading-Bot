@@ -11,7 +11,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
 [![Lines of Code](https://img.shields.io/badge/Lines%20of%20Code-53%2C776-informational)](src/)
 
-**7 trading strategies · 🐋 whale tracker & copy-trade simulator · 📊 real-time dashboard · 🔒 paper trading by default**
+**7 trading strategies · 🐋 whale tracker & copy-trade estimator · 📊 real-time dashboard · 🔒 paper trading by default**
 
 [Features](#-features) · [Quick Start](#-quick-start) · [Strategies](#-strategies) · [Whale Scanner](#-whale-tracking--scanner) · [Dashboard](#-real-time-dashboard) · [Configuration](#%EF%B8%8F-configuration) · [API Reference](#-api-endpoints) · [Custom Development](#-custom-bot-development)
 
@@ -29,7 +29,7 @@
 
 A production-grade, modular trading system for [Polymarket](https://polymarket.com) prediction markets. Run **7 concurrent strategies** — from cross-market arbitrage to AI-driven forecasting — each isolated in its own wallet with independent capital, risk limits, and execution modes (LIVE or PAPER).
 
-The platform includes an enterprise-level **whale tracking engine** that auto-discovers profitable traders, scores them with regime-adaptive algorithms, detects coordinated whale clusters, and lets you simulate copy-trading their moves — all from a beautiful real-time dashboard.
+The platform includes an enterprise-level **whale tracking engine** that auto-discovers profitable traders, scores them with regime-adaptive algorithms, detects coordinated whale clusters, and produces clearly-labeled copy-trade ESTIMATES (assumed slippage/delay — not live fills) — all from a beautiful real-time dashboard.
 
 ### Why This Bot?
 
@@ -67,7 +67,7 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
 - **Regime-Adaptive Scoring** — Automatically adjusts whale scores based on current market conditions
 - **Whale Cluster Detection** — Identifies when multiple whales converge on the same market
 - **Network Graph Analysis** — Visualizes relationships between whale wallets
-- **Copy-Trade Simulator** — Backtest copy-trading strategies with configurable slippage & delay
+- **Copy-Trade Estimator** — Replay copy-trading with configurable assumed slippage & delay (an estimate, not live fills)
 - **Big Trade Alerts** — Real-time alerts for trades ≥ $3K
 - **Cross-Reference Engine** — Deep-scans top whales across all markets
 - **Historical Backfill** — 7-day lookback on first run for immediate insights
@@ -87,7 +87,7 @@ The platform includes an enterprise-level **whale tracking engine** that auto-di
   - 🔍 Scanner — Live scan results with whale profiles
   - 📊 Clusters — Coordinated whale activity detection
   - 🕸️ Network — Wallet relationship graph
-  - 📈 Copy Sim — Copy-trade performance simulation
+  - 📈 Copy Estimate — Copy-trade performance estimate (assumed slippage/delay)
   - 🌊 Regime — Market regime analysis & adaptive scoring
   - 🔄 API Pool — Endpoint health & rate limit monitoring
 - **Performance Metrics** — Markets/sec, trades/sec, fetch latency, cache hit rate
@@ -308,9 +308,9 @@ The whale tracking engine is a self-contained system that discovers, scores, and
          │                                                │
          ▼                                                ▼
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Fast Scan Mode  │     │  Cluster Detect   │     │  Copy Simulator │
-│  60s interval    │     │  2+ whales same   │     │  Backtest with  │
-│  Top 5 markets   │     │  market = cluster │     │  slippage model │
+│  Fast Scan Mode  │     │  Cluster Detect   │     │  Copy Estimate  │
+│  60s interval    │     │  2+ whales same   │     │  Assumed slip-  │
+│  Top 5 markets   │     │  market = cluster │     │  page & delay   │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
 ```
 
@@ -328,7 +328,7 @@ whale_tracking:
     autoPromoteMinScore: 60          # Minimum score to auto-track
     clusterDetectionEnabled: true    # Detect whale herds
     networkGraphEnabled: true        # Map whale relationships
-    copySimEnabled: true             # Simulate copy trading
+    copySimEnabled: true             # Estimate copy trading (offline replay, not live fills)
     regimeAdaptiveEnabled: true      # Adjust scores by regime
 ```
 
@@ -508,7 +508,7 @@ src/
 ├── risk/                    # Risk engine, exposure limits, kill switch
 ├── wallets/                 # Wallet manager, paper & Polymarket wallets
 ├── whales/                  # Whale scanner, scoring, clusters, network
-├── paper_trading/           # Fill simulator, P&L tracker, slippage model
+├── paper_trading/           # Deterministic book matcher, taker-fee model (real CLOB data)
 ├── reporting/               # Dashboard server, logging, performance
 ├── storage/                 # SQLite database & models
 └── data/                    # Market fetcher, orderbook, trade history
@@ -518,7 +518,7 @@ src/
 - **Wallet isolation** — Each strategy operates in a sandboxed wallet
 - **Event-driven** — SSE for dashboard, signal-based execution
 - **Pluggable strategies** — Extend `BaseStrategy` for custom logic
-- **Paper-first** — Everything defaults to simulation mode
+- **Paper-first** — PAPER mode fills against the real CLOB order book; LIVE stays off until it is wired
 - **Zero external services** — SQLite, no Redis/Postgres/RabbitMQ required
 
 ---

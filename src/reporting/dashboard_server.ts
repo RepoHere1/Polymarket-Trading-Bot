@@ -1,6 +1,5 @@
 import http from 'http';
 import { WalletManager } from '../wallets/wallet_manager';
-import { PaperWallet } from '../wallets/paper_wallet';
 import { MarketFetcher } from '../data/market_fetcher';
 import { buildDashboardPayload } from './dashboard_api';
 import { listStrategies } from '../strategies/registry';
@@ -1981,7 +1980,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <button class="btn wh-sub" data-sub="scanner" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">🔍 Scanner</button>
     <button class="btn wh-sub" data-sub="clusters" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">🔗 Clusters</button>
     <button class="btn wh-sub" data-sub="network" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">🕸️ Network</button>
-    <button class="btn wh-sub" data-sub="copysim" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">📋 Copy Sim</button>
+    <button class="btn wh-sub" data-sub="copysim" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">📋 Copy Estimate</button>
     <button class="btn wh-sub" data-sub="regime" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">📊 Regime</button>
     <button class="btn wh-sub" data-sub="apipool" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">⚡ API Pool</button>
     <button class="btn wh-sub" data-sub="add" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">+ Add Whale</button>
@@ -2113,22 +2112,22 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     </div>
   </div>
 
-  <!-- ═══ COPY SIMULATOR VIEW ═══ -->
+  <!-- ═══ COPY ESTIMATE VIEW (offline replay — not live fills) ═══ -->
   <div id="wh-view-copysim" class="wh-view" style="display:none">
     <div class="form-box" style="margin-bottom:16px">
-      <h3 style="margin:0 0 12px 0">📋 Copy-Trade Simulator</h3>
-      <p style="font-size:12px;color:var(--muted);margin:0 0 12px 0">Paper-simulates copying each top whale's trades with realistic slippage and delay. Shows what your PnL would be if you mirrored their positions.</p>
+      <h3 style="margin:0 0 12px 0">📋 Copy-Trade Estimate</h3>
+      <p style="font-size:12px;color:var(--muted);margin:0 0 12px 0">Offline replay that ESTIMATES copying each top whale's trades using assumed slippage and delay (config: copySimSlippageBps / copySimDelaySeconds). Derived from historical whale prints — not live fills, not executable results.</p>
       <div class="summary-row" id="wh-cs-summary">
-        <div class="s-card"><div class="label">Whales Simulated</div><div class="value" id="wh-cs-count">-</div></div>
+        <div class="s-card"><div class="label">Whales Replayed</div><div class="value" id="wh-cs-count">-</div></div>
         <div class="s-card"><div class="label">Profitable</div><div class="value" id="wh-cs-profit">-</div></div>
         <div class="s-card"><div class="label">Best ROI</div><div class="value" id="wh-cs-best">-</div></div>
-        <div class="s-card"><div class="label">Total Sim PnL</div><div class="value" id="wh-cs-total">-</div></div>
+        <div class="s-card"><div class="label">Total Est. PnL</div><div class="value" id="wh-cs-total">-</div></div>
       </div>
     </div>
     <div class="form-box">
       <div class="wallet-table"><table>
-        <thead><tr><th>Whale</th><th>Trades Copied</th><th>Sim PnL</th><th>ROI</th><th>Win Rate</th><th>Avg Slippage</th><th>Max Drawdown</th><th>Sharpe</th><th>Verdict</th></tr></thead>
-        <tbody id="wh-cs-body"><tr><td colspan="9" class="empty">Loading copy-sim results…</td></tr></tbody>
+        <thead><tr><th>Whale</th><th>Trades Replayed</th><th>Est. PnL</th><th>ROI</th><th>Win Rate</th><th>Avg Slippage (assumed)</th><th>Max Drawdown</th><th>Sharpe</th><th>Verdict</th></tr></thead>
+        <tbody id="wh-cs-body"><tr><td colspan="9" class="empty">Loading copy-trade estimates…</td></tr></tbody>
       </table></div>
     </div>
   </div>
@@ -4058,7 +4057,7 @@ async function loadNetworkGraph(){
   }catch(e){console.error('Network graph error',e);document.getElementById('wh-net-body').innerHTML='<tr><td colspan="5" class="empty">Error loading network graph</td></tr>'}
 }
 
-/* ─── Copy-Trade Simulator ─── */
+/* ─── Copy-Trade Estimate (offline replay — not live fills) ─── */
 async function loadCopySim(){
   try{
     const r=await fetch('/api/whales/scanner/copysim');
@@ -4073,7 +4072,7 @@ async function loadCopySim(){
     document.getElementById('wh-cs-best').innerHTML='<span style="color:'+(bestRoi>=0?'var(--green)':'var(--red)'+'">'+(bestRoi*100).toFixed(1)+'%</span>');
     document.getElementById('wh-cs-total').innerHTML='<span class="'+(totalPnl>=0?'pnl-pos':'pnl-neg')+'">$'+fmt(totalPnl)+'</span>';
     const tbody=document.getElementById('wh-cs-body');
-    if(arr.length===0){tbody.innerHTML='<tr><td colspan="9" class="empty">No copy-sim results yet. The simulator runs after whale scanning completes.</td></tr>';return}
+    if(arr.length===0){tbody.innerHTML='<tr><td colspan="9" class="empty">No copy-trade estimates yet. The estimate runs after whale scanning completes.</td></tr>';return}
     tbody.innerHTML=arr.sort((a,b)=>(b.roi||0)-(a.roi||0)).map(x=>{
       const addr=x.whaleAddress?(x.whaleAddress.slice(0,6)+'…'+x.whaleAddress.slice(-4)):'?';
       const pnlC=(x.simPnl||0)>=0?'pnl-pos':'pnl-neg';
@@ -4091,7 +4090,7 @@ async function loadCopySim(){
         '<td>'+verdict+'</td>'+
         '</tr>';
     }).join('');
-  }catch(e){console.error('CopySim error',e);document.getElementById('wh-cs-body').innerHTML='<tr><td colspan="9" class="empty">Error loading copy-sim results</td></tr>'}
+  }catch(e){console.error('CopySim error',e);document.getElementById('wh-cs-body').innerHTML='<tr><td colspan="9" class="empty">Error loading copy-trade estimates</td></tr>'}
 }
 
 /* ─── Regime State ─── */

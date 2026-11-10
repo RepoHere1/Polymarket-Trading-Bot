@@ -338,7 +338,7 @@ whale_tracking:
     # ── Whale Network Graph ──
     networkGraphEnabled: true
 
-    # ── Copy-Trade Simulator ──
+    # ── Copy-Trade Estimator (offline replay: assumed slippage & delay — NOT live fills) ──
     copySimEnabled: true
     copySimSlippageBps: 30              # assumed 30 bps slippage
     copySimDelaySeconds: 10             # assumed 10s copy delay

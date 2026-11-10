@@ -33,6 +33,7 @@ export type LogCategory =
   | 'SIGNAL'
   | 'ORDER'
   | 'FILL'
+  | 'DEPTH'
   | 'POSITION'
   | 'RISK'
   | 'ENGINE'

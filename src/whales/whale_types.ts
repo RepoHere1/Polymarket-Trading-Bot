@@ -458,7 +458,7 @@ export interface ScannerConfig {
   usdcContractAddress: string;
   /** Enable whale network graph analysis */
   networkGraphEnabled: boolean;
-  /** Enable copy-trade simulation */
+  /** Enable copy-trade estimate (offline replay — not live fills) */
   copySimEnabled: boolean;
   /** Default slippage assumption for copy sim (bps) */
   copySimSlippageBps: number;
@@ -630,24 +630,24 @@ export interface WhaleNetworkGraph {
   computedAt: string;
 }
 
-/* ━━━━━━━━━━━━━━ Copy-Trade Simulator ━━━━━━━━━━━━━━ */
+/* ━━━━━━━━━━━━━━ Copy-Trade Estimator (assumed slippage & delay — not live fills) ━━━━━━━━━━━━━━ */
 
-/** Result of a simulated copy-trade for a whale */
+/** Result of an estimated copy-trade replay for a whale */
 export interface CopySimResult {
   whaleAddress: string;
-  /** Simulated PnL if we had copied every trade */
+  /** Estimated PnL if we had copied every trade (assumed slippage — not live fills) */
   simulatedPnlUsd: number;
-  /** Number of trades simulated */
+  /** Number of trades replayed in the estimate */
   tradesCopied: number;
   /** Win rate of copied trades */
   copyWinRate: number;
-  /** Maximum simulated drawdown */
+  /** Maximum drawdown across the estimated replay */
   maxDrawdownPct: number;
-  /** Sharpe ratio of simulated returns */
+  /** Sharpe ratio of the estimated replay returns */
   copySharpeRatio: number;
   /** Average slippage assumed (bps) */
   assumedSlippageBps: number;
-  /** Simulation period */
+  /** Estimate period */
   fromTs: string;
   toTs: string;
   /** Per-trade breakdown */

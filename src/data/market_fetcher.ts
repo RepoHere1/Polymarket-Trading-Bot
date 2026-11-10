@@ -51,8 +51,8 @@ export class MarketFetcher {
   async fetchSnapshot(): Promise<MarketData[]> {
     try {
       const raw = await this.fetchAllPages();
-      const markets = this.parseMarkets(raw);
-      logger.info({ count: markets.length, pages: Math.ceil(raw.length / MarketFetcher.PAGE_SIZE) }, 'Fetched live markets from Gamma API');
+      const { markets, skippedNoQuote } = this.parseMarkets(raw);
+      logger.info({ count: markets.length, skippedNoQuote, pages: Math.ceil(raw.length / MarketFetcher.PAGE_SIZE) }, 'Fetched live markets from Gamma API');
       return markets;
     } catch (error) {
       logger.error({ error }, 'Failed to fetch markets from Gamma API');
@@ -97,8 +97,9 @@ export class MarketFetcher {
 
   /* ── Parse raw Gamma response into MarketData ── */
 
-  private parseMarkets(raw: GammaMarket[]): MarketData[] {
+  private parseMarkets(raw: GammaMarket[]): { markets: MarketData[]; skippedNoQuote: number } {
     const markets: MarketData[] = [];
+    let skippedNoQuote = 0;
 
     for (const m of raw) {
       try {
@@ -113,19 +114,24 @@ export class MarketFetcher {
 
         const yesPrice = outcomePrices[0] ?? 0.5;
         const noPrice = outcomePrices[1] ?? 1 - yesPrice;
-        let bid = m.bestBid ?? Math.max(0.01, yesPrice - 0.02);
-        let ask = m.bestAsk ?? Math.min(0.99, yesPrice + 0.02);
-        // Gamma sometimes returns bestBid > bestAsk; normalise
-        if (bid > ask) {
-          const tmp = bid;
-          bid = ask;
-          ask = tmp;
+
+        /* Step C: a real two-sided quote is required. NO synthetic fallback.
+           If Gamma gives no usable bid/ask (missing, non-positive, equal, or
+           crossed), skip the market for this poll and count the skip. */
+        const rawBid = m.bestBid;
+        const rawAsk = m.bestAsk;
+        const hasQuote =
+          Number.isFinite(rawBid) &&
+          Number.isFinite(rawAsk) &&
+          rawBid > 0 &&
+          rawAsk > 0 &&
+          rawAsk > rawBid;
+        if (!hasQuote) {
+          skippedNoQuote++;
+          continue;
         }
-        // Fallback: derive from yesPrice when bid/ask are zero or equal
-        if (bid === 0 && ask === 0) {
-          bid = Math.max(0.001, yesPrice - 0.01);
-          ask = Math.min(0.999, yesPrice + 0.01);
-        }
+        const bid = rawBid;
+        const ask = rawAsk;
         const mid = (bid + ask) / 2;
 
         markets.push({
@@ -156,6 +162,10 @@ export class MarketFetcher {
       }
     }
 
-    return markets;
+    if (skippedNoQuote > 0) {
+      logger.info({ skipped: skippedNoQuote }, 'Skipped markets without a real two-sided bid/ask quote');
+    }
+
+    return { markets, skippedNoQuote };
   }
 }

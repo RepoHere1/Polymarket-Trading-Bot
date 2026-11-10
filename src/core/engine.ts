@@ -5,9 +5,10 @@ import { WalletManager } from '../wallets/wallet_manager';
 import { OrderRouter } from '../execution/order_router';
 import { StrategyInterface } from '../strategies/strategy_interface';
 import { STRATEGY_REGISTRY } from '../strategies/registry';
-import { AppConfig, MarketData } from '../types';
+import { AppConfig, MarketData, OrderRequest } from '../types';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
+import { matchAgainstBook } from '../paper_trading/book_matcher';
 
 interface StrategyRunner {
   strategy: StrategyInterface;
@@ -26,11 +27,40 @@ export class Engine {
     private readonly config: AppConfig,
     private readonly walletManager: WalletManager,
     private readonly orderRouter: OrderRouter,
+    /** Optional override so tests can inject a stubbed book source */
+    clobFetcher?: ClobFetcher,
   ) {
     // Pass Gamma API URL from config to the OrderbookStream
     this.stream = new OrderbookStream(config.polymarket.gammaApi);
-    this.clobFetcher = new ClobFetcher(config.polymarket.clobApi);
+    this.clobFetcher = clobFetcher ?? new ClobFetcher(config.polymarket.clobApi);
     this.walletManager.setPaperDependencies(this.stream, this.clobFetcher);
+  }
+
+  /**
+   * Step B: size orders against real executable depth. A marketable limit
+   * order is only as good as the book behind it. We walk the live CLOB book
+   * exactly the way the PAPER matcher will: if nothing crosses the limit,
+   * the order is dropped up front; if only part of the size is visible,
+   * that is flagged and the wallet fills whatever is really there.
+   */
+  private async checkDepth(order: OrderRequest): Promise<{ filledSize: number; reason?: string }> {
+    const market = this.stream.getMarket(order.marketId);
+    if (!market) {
+      return { filledSize: 0, reason: 'market not in live cache' };
+    }
+    const tokenId = order.outcome === 'YES' ? market.clobTokenIds[0] : market.clobTokenIds[1];
+    if (!tokenId) {
+      return { filledSize: 0, reason: `no CLOB token for ${order.outcome}` };
+    }
+    const book = await this.clobFetcher.fetchOrderBook(tokenId);
+    if (!book) {
+      return { filledSize: 0, reason: 'order book unavailable' };
+    }
+    const match = matchAgainstBook(book, { side: order.side, limitPrice: order.price, size: order.size });
+    return {
+      filledSize: match.filledSize,
+      reason: match.filledSize === 0 ? 'no visible depth at limit' : undefined,
+    };
   }
 
   async initialize(): Promise<void> {
@@ -273,20 +303,57 @@ export class Engine {
 
     for (const order of orders) {
       try {
-        const executed = await this.orderRouter.route(order);
-        if (executed) {
-          runner.strategy.notifyFill(order);
-          consoleLog.success('FILL', `[${runner.strategy.name}] Executed ${order.side} ${order.outcome} ×${order.size} @ $${order.price.toFixed(4)}`, {
+        /* ── Step B: check executable depth before sending ── */
+        const depth = await this.checkDepth(order);
+        if (depth.filledSize <= 0) {
+          consoleLog.warn('DEPTH', `[${runner.strategy.name}] Dropped ${order.side} ${order.outcome} ×${order.size} @ $${order.price.toFixed(4)} — ${depth.reason}`, {
             walletId: order.walletId,
-            strategy: order.strategy,
             marketId: order.marketId,
-            outcome: order.outcome,
             side: order.side,
+            outcome: order.outcome,
             price: order.price,
             size: order.size,
-            cost: Number((order.price * order.size).toFixed(4)),
+            reason: depth.reason,
+          });
+          continue;
+        }
+        if (depth.filledSize < order.size) {
+          consoleLog.warn('DEPTH', `[${runner.strategy.name}] Thin book — only ${depth.filledSize}/${order.size} visible at $${order.price.toFixed(4)} for ${order.side} ${order.outcome}`, {
+            walletId: order.walletId,
+            marketId: order.marketId,
+            visible: depth.filledSize,
+            requested: order.size,
           });
         }
+
+        /* ── Step A: route and use the REAL fill result ── */
+        const fill = await this.orderRouter.route(order);
+        if (!fill) {
+          consoleLog.warn('ORDER', `[${runner.strategy.name}] No fill — ${order.side} ${order.outcome} ×${order.size} @ $${order.price.toFixed(4)} did not cross the book`, {
+            walletId: order.walletId,
+            marketId: order.marketId,
+            side: order.side,
+            outcome: order.outcome,
+            price: order.price,
+            size: order.size,
+          });
+          continue;
+        }
+
+        // Notify the strategy with the ACTUAL fill (average price, filled size) — never the raw request
+        const filledOrder: OrderRequest = { ...order, price: fill.price, size: fill.size };
+        runner.strategy.notifyFill(filledOrder);
+        consoleLog.success('FILL', `[${runner.strategy.name}] Filled ${order.side} ${order.outcome} ×${fill.size} @ $${fill.price.toFixed(4)} (fee $${fill.fee} ${fill.feeAsset})`, {
+          walletId: order.walletId,
+          strategy: order.strategy,
+          marketId: order.marketId,
+          outcome: order.outcome,
+          side: order.side,
+          price: fill.price,
+          size: fill.size,
+          fee: fill.fee,
+          cost: Number((fill.price * fill.size).toFixed(4)),
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         consoleLog.error('ORDER', `[${runner.strategy.name}] Order failed: ${msg}`, {
@@ -317,18 +384,29 @@ export class Engine {
 
     for (const exitOrder of exitOrders) {
       try {
-        const executed = await this.orderRouter.route(exitOrder);
-        if (executed) {
-          consoleLog.success('FILL', `[${runner.strategy.name}] Exited ${exitOrder.outcome} ×${exitOrder.size} @ $${exitOrder.price.toFixed(4)}`, {
+        const fill = await this.orderRouter.route(exitOrder);
+        if (!fill) {
+          consoleLog.warn('ORDER', `[${runner.strategy.name}] Exit not filled — ${exitOrder.side} ${exitOrder.outcome} ×${exitOrder.size} @ $${exitOrder.price.toFixed(4)} did not cross the book`, {
             walletId: exitOrder.walletId,
-            strategy: exitOrder.strategy,
             marketId: exitOrder.marketId,
-            outcome: exitOrder.outcome,
             side: exitOrder.side,
+            outcome: exitOrder.outcome,
             price: exitOrder.price,
             size: exitOrder.size,
           });
+          continue;
         }
+        consoleLog.success('FILL', `[${runner.strategy.name}] Exit filled ${exitOrder.outcome} ×${fill.size} @ $${fill.price.toFixed(4)} (fee $${fill.fee} ${fill.feeAsset})`, {
+          walletId: exitOrder.walletId,
+          strategy: exitOrder.strategy,
+          marketId: exitOrder.marketId,
+          outcome: exitOrder.outcome,
+          side: exitOrder.side,
+          price: fill.price,
+          size: fill.size,
+          fee: fill.fee,
+          proceeds: Number((fill.price * fill.size).toFixed(4)),
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         consoleLog.error('ORDER', `[${runner.strategy.name}] Exit order failed: ${msg}`, {

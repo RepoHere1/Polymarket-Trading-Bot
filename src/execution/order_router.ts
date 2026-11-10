@@ -1,4 +1,4 @@
-import { OrderRequest } from '../types';
+import { OrderFill, OrderRequest } from '../types';
 import { WalletManager } from '../wallets/wallet_manager';
 import { RiskEngine } from '../risk/risk_engine';
 import { TradeExecutor } from './trade_executor';
@@ -12,7 +12,13 @@ export class OrderRouter {
     private readonly tradeExecutor: TradeExecutor,
   ) {}
 
-  async route(order: OrderRequest): Promise<boolean> {
+  /**
+   * Routes an order through risk checks to the wallet.
+   * Returns the real OrderFill on execution, or null when the order was
+   * dropped (wallet missing, risk rejected) or simply did not fill
+   * (limit never crossed the book). Callers must treat null as "no fill".
+   */
+  async route(order: OrderRequest): Promise<OrderFill | null> {
     const wallet = this.walletManager.getWallet(order.walletId);
     if (!wallet) {
       logger.warn({ walletId: order.walletId }, 'Wallet not found');
@@ -20,7 +26,7 @@ export class OrderRouter {
         walletId: order.walletId,
         marketId: order.marketId,
       });
-      return false;
+      return null;
     }
 
     const state = wallet.getState();
@@ -36,10 +42,9 @@ export class OrderRouter {
         price: order.price,
         size: order.size,
       });
-      return false;
+      return null;
     }
 
-    await this.tradeExecutor.execute(order, wallet);
-    return true;
+    return this.tradeExecutor.execute(order, wallet);
   }
 }

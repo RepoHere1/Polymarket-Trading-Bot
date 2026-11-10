@@ -1,4 +1,4 @@
-﻿import { WalletConfig, WalletState, TradeRecord, RiskLimits, OrderFill } from '../types';
+﻿import { WalletConfig, WalletState, TradeRecord, OrderFill } from '../types';
 import { OrderbookStream } from '../data/orderbook_stream';
 import { ClobFetcher } from '../data/clob_fetcher';
 import { matchAgainstBook, takerFeeUsdc } from '../paper_trading/book_matcher';
