@@ -69,12 +69,12 @@ Each step needs its own test before the next one starts.
 
 **Step E: Copy-trade delay.** ✅ DONE (labeled as estimate). `copySimDelaySeconds` in `config.yaml` is never used, and the copy-trade simulator is the same kind of theatre. Either wire it to the real trade timestamp and the book at that time, or label it as an estimate in the dashboard. Do not present it as a result. — It is now labeled "Copy-Trade Estimate / offline replay — not live fills" across the dashboard, config, types, and README. `copySimDelaySeconds` still only documents an assumption; wiring real delayed fills needs book history we do not store.
 
-**Step F: LIVE execution (awaiting owner go-ahead; credentials and SDK already in place).** ❌ NOT STARTED. The earlier EVM/EIP-712/HMAC spec was WRONG — that is the international CLOB model; this account is polyUSA. Actual plan:
+**Step F: LIVE execution (awaiting owner go-ahead).** ✅ IMPLEMENTED 2026-11-10 — `src/wallets/polymarket_wallet.ts` now trades via the polyUSA SDK; typecheck, lint, and all 181 tests green (`tests/polymarket_wallet.test.ts` covers it). The earlier EVM/EIP-712/HMAC spec was WRONG — that is the international CLOB model; this account is polyUSA. Status of the plan:
 1. Credentials: already present — `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE` in `.env` and `D:\master.env` (owner-created at polymarket.us/developer). Nothing to install or supply.
 2. Client: the already-installed `polymarket-us@0.1.1` SDK (deps `@noble/ed25519`, `ws`). Auth proven by the scratch probes: Ed25519 sign of `timestamp + method + path`, base64 secret decoded to a 32-byte seed, `X-PM-Access-Key` header family, base `https://api.polymarket.us`.
-3. Implement `src/wallets/polymarket_wallet.ts` on `new PolymarketUS({ keyId, secretKey }).orders.create(CreateOrderParams)`. Map side/price/size from the bot's order type; keep the same risk engine and `ENABLE_LIVE_TRADING` gate.
-4. Dry run: authenticate and validate an order without submitting (SDK validation or sign-only path); confirm balances via `client.portfolio`.
-5. ONE tiny live order only after explicit owner approval. No EVM library, no EIP-712, no HMAC — do not reintroduce them.
+3. ✅ DONE. Implemented on `new PolymarketUS({ keyId, secretKey })` with `orders.create(CreateOrderParams)`: YES/NO×BUY/SELL mapped to the four `ORDER_INTENT_*` values, limit IOC, integer share quantities, SELL clamped to held shares, price string to 3 decimals. Balance is exchange truth (`account.balances()`, USD buying power, 10s TTL, forced pre-trade). Markets are verified against the polyUSA catalog (`markets.retrieveBySlug`) and the miss is cached; the Gamma→slug lookup uses the shared OrderbookStream cache via WalletManager.
+4. ✅ DONE by design: DRY RUN IS THE DEFAULT. An order is actually sent only when `POLYMARKET_DRY_RUN === 'false'`; otherwise `orders.preview()` validates server-side and nothing is placed. No executions in the response → no fill reported (honest fills only).
+5. ONE tiny live order only after explicit owner approval. No EVM library, no EIP-712, no HMAC — do not reintroduce them. Rebuild and restart the bot before arming LIVE.
 
 **Step G: Dashboard and cleanup.** ✅ DONE. Remove the remaining "simulated" labels, "copy-trade simulator" wording, and fake-fill text across `dashboard_server.ts` and `README.md`. Confirm no `Math.random` in `src/paper_trading` or `src/wallets`.
 
@@ -84,7 +84,7 @@ Each step needs its own test before the next one starts.
 - The engine depth check (Step B) adds one CLOB `/book` fetch per entry order. Batch or cache if it becomes hot.
 - Gamma pagination terminates via a 422: the `/markets` endpoint rejects deep offsets (observed at offset 2100), so every poll logs one `Gamma API page request failed` ERROR (status 422, offset 2100) and completes with ~1,807 markets over 21 pages. Pre-existing behavior — the page loop breaks on failure — not a Step C regression. If coverage beyond ~2,100 markets is ever needed, switch to a keyset/date filter instead of offset paging.
 
-- LIVE cannot place orders. This is intentional.
+- LIVE wallet code is implemented (Step F, 2026-11-10) but cannot send a real order unless `ENABLE_LIVE_TRADING=true` AND `POLYMARKET_DRY_RUN=false` AND the owner has given explicit go-ahead; the default is preview-only dry run. Known gap: the polyUSA `UserPosition` object has no clean YES/NO outcome mapping, so LIVE open positions track this wallet's own fills rather than `portfolio.positions()`.
 - The whale scanner may be stuck. Its first batch hadn't finished after about 16 minutes, and `marketsPerScan: 50` doesn't cap the loop.
 - `dashboard_server.ts` is about 257 KB in one file. Split it before major changes.
 - RESOLVED 2026-11-10: owner cancelled the rotation permanently (keys are the polyUSA account keys in `D:\master.env`; exposure concern dropped). `find_fees.ts` (tracked; removed via git rm) and the six `test_*.js` probes (untracked) deleted. Credentials now live only in `.env` / `D:\master.env`.

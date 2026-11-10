@@ -60,7 +60,9 @@ export class WalletManager {
 
     const wallet =
       config.mode === 'LIVE'
-        ? new PolymarketWallet(config, assignedStrategy)
+        ? new PolymarketWallet(config, assignedStrategy, {
+            resolveSlug: (marketId) => this.marketData()?.stream.getMarket(marketId)?.slug,
+          })
         : new PaperWallet(config, assignedStrategy, () => this.marketData());
 
     this.wallets.set(config.id, wallet);
