@@ -101,6 +101,10 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
   /* ── Configuration ── */
   private cfg: ConvergenceConfig = { ...DEFAULTS };
 
+  /* ── Scan-log throttle: log on change, else at most once a minute ── */
+  private lastScanLogAt = 0;
+  private lastScanPassed = -1;
+
   /* ── Price history cache per market (clobTokenId → points) ── */
   private priceCache = new Map<string, PricePoint[]>();
 
@@ -193,10 +197,15 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     signals.sort((a, b) => b.confidence - a.confidence);
 
     if (evaluated > 0) {
-      logger.info(
-        { strategy: this.name, evaluated, passed: signals.length },
-        `Convergence scan: ${signals.length}/${evaluated} markets passed all 8 filters`,
-      );
+      const now = Date.now();
+      if (signals.length !== this.lastScanPassed || now - this.lastScanLogAt > 60_000) {
+        logger.info(
+          { strategy: this.name, evaluated, passed: signals.length },
+          `Convergence scan: ${signals.length}/${evaluated} markets passed all 8 filters`,
+        );
+        this.lastScanLogAt = now;
+        this.lastScanPassed = signals.length;
+      }
     }
 
     return signals;

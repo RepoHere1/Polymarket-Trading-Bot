@@ -158,6 +158,10 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         return now - last > this.cooldownMs;
       })
       .map((signal) => {
+        // Arm the per-market cooldown when the order is sized so a
+        // risk-rejected or unfilled attempt is not retried every scan.
+        this.tradeCooldowns.set(`${signal.marketId}:${signal.outcome}:${signal.side}`, now);
+
         const market = this.markets.get(signal.marketId);
         const liquidity = market?.liquidity ?? 500;
 

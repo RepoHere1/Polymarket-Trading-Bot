@@ -109,13 +109,17 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
       }
 
       if (totalPrice > 1 + 0.005) {
-        // Overpriced: sell the expensive side
+        // Overpriced: sell the expensive side. The CLOB has no shorting —
+        // a SELL is only possible when we already hold that outcome, so
+        // skip instead of queueing an unconditional wallet rejection.
         const grossEdge = totalPrice - 1;
         const netEdge = grossEdge - halfSpread * 2 - feeCost;
         if (netEdge * 10_000 < MIN_NET_EDGE_BPS) continue;
 
-        const conf = this.computeConfidence(netEdge, market);
         const expensiveSide: 'YES' | 'NO' = yesPrice >= noPrice ? 'YES' : 'NO';
+        if (!this.hasInventory(market.marketId, expensiveSide)) continue;
+
+        const conf = this.computeConfidence(netEdge, market);
         signals.push({
           marketId: market.marketId,
           outcome: expensiveSide,
@@ -158,9 +162,11 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
             edge: netEdge,
           });
         } else {
-          // Overpriced: sell the most expensive YES
+          // Overpriced: sell the most expensive YES — only with inventory
+          // (the CLOB cannot short; a naked SELL is always rejected).
           const expensive = sorted[sorted.length - 1];
           if (!this.passesFilters(expensive, now)) continue;
+          if (!this.hasInventory(expensive.marketId, 'YES')) continue;
           const netEdge = deviation / group.length - (TAKER_FEE_BPS / 10_000);
           if (netEdge * 10_000 < MIN_NET_EDGE_BPS) continue;
 
@@ -193,6 +199,10 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
         return now - last > this.cooldownMs;
       })
       .map((signal) => {
+        // Arm the per-market cooldown when the order is sized so a
+        // risk-rejected or unfilled attempt is not retried every scan.
+        this.tradeCooldowns.set(`${signal.marketId}:${signal.outcome}:${signal.side}`, now);
+
         const market = this.markets.get(signal.marketId);
 
         // Half-Kelly: f* = edge / odds, then halve
@@ -340,6 +350,13 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
     if (market.spread < 0.001) return false;
 
     return true;
+  }
+
+  /** True when this strategy tracks a long position for market+outcome (SELLs need inventory). */
+  private hasInventory(marketId: string, outcome: 'YES' | 'NO'): boolean {
+    return this.positions.some(
+      (p) => p.marketId === marketId && p.outcome === outcome && p.side === 'BUY' && p.size > 0,
+    );
   }
 
   /* ── Helper: confidence scoring ─────────────────────────────── */
