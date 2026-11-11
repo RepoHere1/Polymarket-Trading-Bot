@@ -12,7 +12,7 @@ Read section 0 before touching anything.
 5. **No key rotation.** Owner decision 2026-11-10: forget the exposure concern permanently. The Polymarket US API keys (`POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE`) are the account's trading keys, already in `D:\master.env` and `.env`. Never print values, never commit them. The scratch files that hardcoded copies were deleted 2026-11-10.
 6. **Install with dev deps.** `NODE_ENV=production` drops `typescript`, `vitest`, `tsx`, and `eslint`. Use `npm install --include=dev`.
 7. **Line endings are CRLF.** Keep them.
-8. **Rebuild and restart the bot after code changes.** Config.yaml PAPER wallets reset to their configured capital on restart (their state is in memory by design); dashboard-created PAPER wallets survive restarts since 2026-11-10 (see the wallet-persistence fix in section 3). Done 2026-11-10: old process (PID 13936) stopped; restarted via `start_bot.ps1` (PAPER mode, PID 10936) on the transformed build `e9241f0`. Expect a new PID after the next restart.
+8. **Rebuild and restart the bot after code changes.** Config.yaml PAPER wallets reset to their configured capital on restart (their state is in memory by design); dashboard-created PAPER wallets survive restarts since 2026-11-10 (see the wallet-persistence fix in section 3). Done 2026-11-10: old process (PID 13936) stopped; restarted via `start_bot.ps1` (PAPER mode, PID 10936) on the transformed build `e9241f0`. Done 2026-11-11 09:16: old process (PID 11904) stopped; restarted via `start_bot.ps1` (PAPER mode, PID 9928) on build `dc82bf0` (the wallet-persistence fix) — verified: dashboard 200, `.runtime/wallets.db` created at boot, stderr clean. Expect a new PID after the next restart.
 
 ## 1. Target behavior
 
