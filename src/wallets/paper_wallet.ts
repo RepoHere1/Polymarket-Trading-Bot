@@ -28,6 +28,8 @@ export class PaperWallet {
   private readonly trades: TradeRecord[] = [];
   private displayName = '';
   private orderSeq = 0;
+  /** Optional persistence hook — fired after every state mutation (fill, balance change, rename). */
+  private onStateChange?: () => void;
 
   constructor(
     config: WalletConfig,
@@ -63,6 +65,7 @@ export class PaperWallet {
 
   updateBalance(delta: number): void {
     this.state.availableBalance += delta;
+    this.onStateChange?.();
   }
 
   /**
@@ -76,10 +79,48 @@ export class PaperWallet {
     }
     this.state.availableBalance = value;
     logger.info({ walletId: this.state.walletId, balance: value }, 'PAPER cash balance set manually (dashboard)');
+    this.onStateChange?.();
   }
 
   getDisplayName(): string {
     return this.displayName;
+  }
+
+  setDisplayName(name: string): void {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    this.displayName = trimmed;
+    this.onStateChange?.();
+  }
+
+  /** Register the persistence callback fired after every state mutation. */
+  attachPersistence(onChange: () => void): void {
+    this.onStateChange = onChange;
+  }
+
+  /**
+   * Rehydrate a persisted snapshot (dashboard wallets survive restarts).
+   * Overwrites balance, positions, realised PnL, risk limits, trades, and name.
+   */
+  restoreState(snapshot: {
+    balance: number;
+    realizedPnl: number;
+    openPositions: WalletState['openPositions'];
+    riskLimits: WalletState['riskLimits'];
+    trades: TradeRecord[];
+    displayName?: string;
+  }): void {
+    this.state.availableBalance = snapshot.balance;
+    this.state.realizedPnl = snapshot.realizedPnl;
+    this.state.openPositions = snapshot.openPositions.map((p) => ({ ...p }));
+    this.state.riskLimits = { ...snapshot.riskLimits };
+    this.trades.length = 0;
+    this.trades.push(...snapshot.trades);
+    if (snapshot.displayName) this.displayName = snapshot.displayName;
+    logger.info(
+      { walletId: this.state.walletId, balance: snapshot.balance, trades: snapshot.trades.length },
+      'PAPER wallet restored from persisted snapshot',
+    );
   }
 
 
@@ -233,5 +274,6 @@ export class PaperWallet {
     if (this.trades.length > MAX_TRADES) {
       this.trades.splice(0, this.trades.length - MAX_TRADES);
     }
+    this.onStateChange?.();
   }
 }
