@@ -717,7 +717,11 @@ export class DashboardServer {
     paused: boolean;
     /** false = config.yaml wallet whose runner already exists — only the pause flag is applied. */
     attachRunner: boolean;
+    /** Per-wallet copy_trade whale addresses (create form) — re-applied on restore. */
+    whaleAddresses?: string[];
   }> = [];
+  /** Wallet id → copy_trade whale addresses its operator entered at creation. */
+  private readonly walletWhaleAddresses = new Map<string, string[]>();
   /** Periodic LIVE balance refresh so every surface shows exchange truth. */
   private liveBalanceTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -735,7 +739,7 @@ export class DashboardServer {
     /* Attach strategy runners for wallets restored from disk — the engine is
        wired AFTER dashboardServer.start(), so restoration had to defer these. */
     for (const r of this.pendingRestoredRunners) {
-      this.attachRestoredRunner(r.walletId, r.strategy, r.paused, r.attachRunner);
+      this.attachRestoredRunner(r.walletId, r.strategy, r.paused, r.attachRunner, r.whaleAddresses);
     }
     this.pendingRestoredRunners = [];
   }
@@ -793,6 +797,7 @@ export class DashboardServer {
       trades: this.walletManager.getTradeHistory(walletId),
       paused: this.engine?.isRunnerPaused(walletId) ?? false,
       source: this.dashboardWalletIds.has(walletId) ? 'dashboard' : 'config',
+      whaleAddresses: this.walletWhaleAddresses.get(walletId) ?? [],
     });
   }
 
@@ -844,7 +849,7 @@ export class DashboardServer {
       this.walletManager.addWallet(wallet);
       this.walletDisplayNames.set(p.walletId, p.displayName);
       this.dashboardWalletIds.add(p.walletId);
-      this.pendingRestoredRunners.push({ walletId: p.walletId, strategy: p.strategy, paused: p.paused, attachRunner: true });
+      this.pendingRestoredRunners.push({ walletId: p.walletId, strategy: p.strategy, paused: p.paused, attachRunner: true, whaleAddresses: p.whaleAddresses });
       restoredCount++;
       logger.info(
         { walletId: p.walletId, strategy: p.strategy, balance: p.balance, trades: p.trades.length },
@@ -859,9 +864,18 @@ export class DashboardServer {
     }
   }
 
-  private attachRestoredRunner(walletId: string, strategy: string, paused: boolean, attachRunner = true): void {
+  private attachRestoredRunner(
+    walletId: string,
+    strategy: string,
+    paused: boolean,
+    attachRunner = true,
+    whaleAddresses?: string[],
+  ): void {
     if (!this.engine) return;
-    if (attachRunner) this.engine.addRunner(walletId, strategy);
+    if (whaleAddresses && whaleAddresses.length > 0) this.walletWhaleAddresses.set(walletId, whaleAddresses);
+    if (attachRunner) {
+      this.engine.addRunner(walletId, strategy, whaleAddresses?.length ? { whale_addresses: whaleAddresses } : undefined);
+    }
     if (paused) this.engine.pauseRunner(walletId);
   }
 
@@ -1022,6 +1036,36 @@ export class DashboardServer {
         return;
       }
 
+      /* ── Whale addresses for copy_trade wallets (create form box) ──
+         Real Polymarket proxy wallet addresses (0x + 40 hex). Accepted as an
+         array or comma/space/newline-separated string; strictly validated —
+         anything malformed is refused (never guessed, never faked). */
+      let whaleAddresses: string[] = [];
+      const rawWhales: unknown = body.whaleAddresses;
+      if (rawWhales !== undefined && rawWhales !== null && rawWhales !== '') {
+        if (strategy !== 'copy_trade') {
+          json(res, 400, { ok: false, error: 'whaleAddresses only applies to the copy_trade strategy.' });
+          return;
+        }
+        const parts = Array.isArray(rawWhales) ? rawWhales.map((x) => String(x)) : String(rawWhales).split(/[\s,;]+/);
+        for (const part of parts) {
+          const addr = part.trim().toLowerCase();
+          if (!addr) continue;
+          if (!/^0x[0-9a-f]{40}$/.test(addr)) {
+            json(res, 400, {
+              ok: false,
+              error: `"${part.trim()}" is not a valid whale wallet address. Expected 0x followed by 40 hex characters — a real Polymarket proxy wallet ADDRESS (not a username).`,
+            });
+            return;
+          }
+          if (!whaleAddresses.includes(addr)) whaleAddresses.push(addr);
+        }
+        if (whaleAddresses.length > 50) {
+          json(res, 400, { ok: false, error: 'Too many whale addresses (max 50 per wallet).' });
+          return;
+        }
+      }
+
       if ((mode === 'LIVE' || mode === 'LIVE_LANE') && process.env.ENABLE_LIVE_TRADING !== 'true') {
         json(res, 403, {
           ok: false,
@@ -1106,8 +1150,9 @@ export class DashboardServer {
         );
         this.walletManager.addWallet(lane);
         this.walletManager.registerLiveLane(parentWalletId, walletId, capital);
+        if (whaleAddresses.length > 0) this.walletWhaleAddresses.set(walletId, whaleAddresses);
         if (this.engine) {
-          this.engine.addRunner(walletId, strategy);
+          this.engine.addRunner(walletId, strategy, whaleAddresses.length > 0 ? { whale_addresses: whaleAddresses } : undefined);
         }
         json(res, 201, {
           ok: true,
@@ -1162,9 +1207,12 @@ export class DashboardServer {
         this.liveApiKeyByWallet.set(walletId, liveKeyId);
       }
 
-      /* Connect the new wallet to the engine so its strategy runs */
+      /* Connect the new wallet to the engine so its strategy runs. A copy_trade
+         wallet created with whale addresses starts following them from its
+         FIRST tick (per-wallet config override, merged over config.yaml). */
+      if (whaleAddresses.length > 0) this.walletWhaleAddresses.set(walletId, whaleAddresses);
       if (this.engine) {
-        this.engine.addRunner(walletId, strategy);
+        this.engine.addRunner(walletId, strategy, whaleAddresses.length > 0 ? { whale_addresses: whaleAddresses } : undefined);
       }
 
       /* Persist PAPER wallets so they survive restarts. LIVE wallets hold
@@ -1225,6 +1273,7 @@ export class DashboardServer {
       }
       this.liveApiKeyByWallet.delete(walletId);
       this.dashboardWalletIds.delete(walletId);
+      this.walletWhaleAddresses.delete(walletId);
       this.walletStore?.deleteWallet(walletId); // forget persisted PAPER wallets too
       if (this.engine) {
         this.engine.removeRunner(walletId);
@@ -1289,6 +1338,8 @@ export class DashboardServer {
         (typeof walletObj?.getDisplayName === 'function' ? walletObj.getDisplayName() : walletId);
       (detail.wallet as Record<string, unknown>).paused =
         this.engine?.isRunnerPaused(walletId) ?? false;
+      (detail.wallet as Record<string, unknown>).whaleAddresses =
+        this.walletWhaleAddresses.get(walletId) ?? [];
       json(res, 200, detail);
       return;
     }
@@ -1411,12 +1462,29 @@ export class DashboardServer {
         json(res, 200, { ok: true, addresses: [], stats: null, whalePerformance: [] });
         return;
       }
-      const inst = instances[0];
-      const addrs = inst.getWhaleAddresses();
-      const stats = inst.getStats();
-      const perfMap = inst.getWhalePerformance();
-      const whalePerformance = addrs.map((a: string) => {
-        const p = perfMap.get(a.toLowerCase());
+      /* Aggregate across ALL copy_trade lanes — since the create-form whale
+         box, every lane carries its OWN whale list (config wallet, dashboard
+         PAPER wallets, LIVE lanes). Union of addresses; per-address
+         performance comes from the lane that actually follows that address. */
+      const addresses: string[] = [];
+      for (const inst of instances) {
+        for (const a of inst.getWhaleAddresses()) {
+          if (!addresses.includes(a)) addresses.push(a);
+        }
+      }
+      const allStats = instances.map((i) => i.getStats());
+      const stats = {
+        totalCopied: allStats.reduce((s, x) => s + (x.totalCopied ?? 0), 0),
+        openPositions: allStats.reduce((s, x) => s + (x.openPositions ?? 0), 0),
+        cumulativePnlBps: allStats.reduce((s, x) => s + (x.cumulativePnlBps ?? 0), 0),
+        drawdownPct: Math.max(0, ...allStats.map((x) => x.drawdownPct ?? 0)),
+        dailyVolumeUsd: allStats.reduce((s, x) => s + (x.dailyVolumeUsd ?? 0), 0),
+        drawdownPaused: allStats.some((x) => x.drawdownPaused),
+      };
+      const whalePerformance = addresses.map((a: string) => {
+        const p = instances
+          .map((i) => i.getWhalePerformance().get(a.toLowerCase()))
+          .find((x) => x !== undefined);
         return {
           address: a,
           tradesCopied: p?.tradesCopied ?? 0,
@@ -1428,7 +1496,7 @@ export class DashboardServer {
           paused: p ? p.pausedUntil > Date.now() : false,
         };
       });
-      json(res, 200, { ok: true, addresses: addrs, stats, whalePerformance });
+      json(res, 200, { ok: true, addresses, stats, whalePerformance });
       return;
     }
 
@@ -2112,6 +2180,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
       <div class="fg"><label>Max Exposure / Market</label><input id="cw-maxexp" type="number" placeholder="auto"></div>
       <div class="fg"><label>Max Daily Loss</label><input id="cw-maxloss" type="number" placeholder="auto"></div>
       <div class="fg"><label>Max Open Trades</label><input id="cw-maxtrades" type="number" value="10" placeholder="10"></div>
+      <div class="fg" id="cw-whales-row" style="display:none;grid-column:1 / -1"><label>🐋 Whale Wallet Addresses (this wallet will copy-trade them)</label><textarea id="cw-whales" rows="2" placeholder="0x… 0x… — real Polymarket proxy wallet ADDRESSES (not usernames). Separate with commas, spaces, or new lines. Leave empty to follow the Whale Tracker's promoted whales automatically." spellcheck="false"></textarea></div>
       <div class="fg" id="cw-cred-key" style="display:none"><label>PolyUSA API Key</label><input id="cw-apikey" placeholder="blank = server .env keys" autocomplete="off" spellcheck="false"></div>
       <div class="fg" id="cw-cred-secret" style="display:none"><label>PolyUSA API Secret</label><input id="cw-apisecret" type="password" placeholder="blank = server .env keys" autocomplete="off"></div>
       <div class="fg" id="cw-cred-parent" style="display:none"><label>Parent LIVE Account</label><select id="cw-parent"><option value="">— no LIVE wallets —</option></select></div>
@@ -2870,6 +2939,15 @@ function renderWalletDetail(d){
     '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 $'+fmt(w.capitalAllocated,0)+' capital</span></div>'+
     '<button class="toggle-btn '+stCls+'" onclick="toggleWalletFromDetail(\\''+w.walletId+'\\','+isPaused+')"><span class="toggle-dot"></span>'+(isPaused?'\u25B6 Start':'\u23F8 Pause')+'</button>'+
     '</div>';
+
+  /* ── Copy-trade whales this wallet follows (per-wallet, from create form) ── */
+  if(w.strategy==='copy_trade'){
+    const wl=Array.isArray(w.whaleAddresses)?w.whaleAddresses:[];
+    html+='<div style="margin:14px 0 0"><h3 style="margin:0 0 6px">\uD83D\uDC33 Whales Followed By This Wallet ('+wl.length+')</h3>'+
+      '<div style="font-family:monospace;font-size:12px;line-height:1.8;word-break:break-all;padding:10px;border:1px solid var(--border);border-radius:8px">'+
+      (wl.length?wl.map(a=>'<div>'+a+'</div>').join(''):'<span style="color:var(--accent)">None entered — follows whales promoted by the \uD83D\uDC33 Whale Tracker automatically.</span>')+
+      '</div></div>';
+  }
 
   /* ── Tabs ── */
   html+='<div class="wd-tabs">'+
@@ -3729,7 +3807,14 @@ async function populateStrategyDropdown(){
     strategies=await r.json();
     const sel=$('#cw-strategy');
     sel.innerHTML=strategies.map(s=>'<option value="'+s.id+'">'+s.name+'</option>').join('');
+    cwToggleWhales();
   }catch(e){console.error(e)}
+}
+
+/* Show the whale-addresses box only when COPY TRADE is the picked strategy. */
+function cwToggleWhales(){
+  const row=document.getElementById('cw-whales-row');
+  if(row)row.style.display=$('#cw-strategy').value==='copy_trade'?'':'none';
 }
 
 function cwToggleCreds(){
@@ -3758,6 +3843,7 @@ async function cwLoadParents(){
 }
 $('#cw-mode').addEventListener('change',cwToggleCreds);
 cwToggleCreds();
+$('#cw-strategy').addEventListener('change',cwToggleWhales);
 
 $('#cw-submit').addEventListener('click',async()=>{
   const body={
@@ -3781,12 +3867,13 @@ $('#cw-submit').addEventListener('click',async()=>{
   const me=$('#cw-maxexp').value;if(me)body.maxExposurePerMarket=Number(me);
   const ml=$('#cw-maxloss').value;if(ml)body.maxDailyLoss=Number(ml);
   const mt=$('#cw-maxtrades').value;if(mt)body.maxOpenTrades=Number(mt);
+  if(body.strategy==='copy_trade'){const wv=$('#cw-whales').value.trim();if(wv)body.whaleAddresses=wv}
 
   try{
     const r=await fetch('/api/wallets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json();
     showMsg('cw-msg',j.ok?'ok':'err',j.message||j.error);
-    if(j.ok){$('#cw-id').value='';$('#cw-capital').value='500';$('#cw-apisecret').value='';refresh()}
+    if(j.ok){$('#cw-id').value='';$('#cw-capital').value='500';$('#cw-apisecret').value='';$('#cw-whales').value='';refresh()}
   }catch(e){showMsg('cw-msg','err','Network error')}
 });
 

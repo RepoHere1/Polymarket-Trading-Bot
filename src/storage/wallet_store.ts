@@ -31,6 +31,12 @@ export interface PersistedPaperWallet {
   trades: TradeRecord[];
   paused: boolean;
   /**
+   * Per-wallet copy_trade whale addresses entered at creation (v3 column).
+   * Empty/undefined for non-copy_trade wallets. Persisted so the operator's
+   * whale list survives restarts with the wallet.
+   */
+  whaleAddresses?: string[];
+  /**
    * Where the row came from — decides restore semantics:
    * - 'dashboard': wallet born in the UI → FULL state is restored on boot and
    *   the wallet is recreated if missing (created once, stays forever).
@@ -71,14 +77,20 @@ export class WalletStore {
     if (!cols.some((c) => c.name === 'source')) {
       this.db.exec("ALTER TABLE paper_wallets ADD COLUMN source TEXT NOT NULL DEFAULT 'config'");
     }
+    /* v3 migration — per-wallet copy_trade whale addresses (JSON array, NULL
+        for wallets without whales). */
+    const cols3 = this.db.prepare('PRAGMA table_info(paper_wallets)').all() as Array<{ name: string }>;
+    if (!cols3.some((c) => c.name === 'whale_addresses')) {
+      this.db.exec('ALTER TABLE paper_wallets ADD COLUMN whale_addresses TEXT');
+    }
   }
 
   savePaperWallet(w: PersistedPaperWallet): void {
     this.db.prepare(`
       INSERT INTO paper_wallets
         (wallet_id, display_name, strategy, capital, balance, realized_pnl,
-         open_positions, risk_limits, trades, paused, updated_at, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         open_positions, risk_limits, trades, paused, updated_at, source, whale_addresses)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(wallet_id) DO UPDATE SET
         display_name   = excluded.display_name,
         strategy       = excluded.strategy,
@@ -90,7 +102,8 @@ export class WalletStore {
         trades         = excluded.trades,
         paused         = excluded.paused,
         updated_at     = excluded.updated_at,
-        source         = excluded.source
+        source         = excluded.source,
+        whale_addresses = excluded.whale_addresses
     `).run(
       w.walletId,
       w.displayName,
@@ -104,6 +117,7 @@ export class WalletStore {
       w.paused ? 1 : 0,
       Date.now(),
       w.source,
+      w.whaleAddresses && w.whaleAddresses.length > 0 ? JSON.stringify(w.whaleAddresses) : null,
     );
   }
 
@@ -126,6 +140,7 @@ export class WalletStore {
         trades: string;
         paused: number;
         source: string;
+        whale_addresses: string | null;
       }>;
     return rows.map((r) => ({
       walletId: r.wallet_id,
@@ -139,6 +154,7 @@ export class WalletStore {
       trades: JSON.parse(r.trades) as TradeRecord[],
       paused: r.paused === 1,
       source: r.source === 'dashboard' ? 'dashboard' : 'config',
+      whaleAddresses: r.whale_addresses ? (JSON.parse(r.whale_addresses) as string[]) : [],
     }));
   }
 
