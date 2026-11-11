@@ -37,8 +37,8 @@ Done and verified in code:
 - `src/paper_trading/book_matcher.ts`: `matchAgainstBook()` and `takerFeeUsdc()`. Tests in `tests/book_matcher.test.ts` (7 pass).
 - `src/wallets/paper_wallet.ts`: fills against the live book, charges the real fee, rejects SELLs with no held shares, clamps SELL size to held shares, and throws when market data is missing. Tests in `tests/paper_wallet.test.ts` (6 pass).
 - `src/wallets/wallet_manager.ts`: PAPER wallets get a lazy market-data provider, so startup order no longer matters. `createPaperWallet()` is used by the dashboard.
-- `src/wallets/polymarket_wallet.ts`: LIVE throws and sends nothing.
-- `src/reporting/dashboard_server.ts`: dashboard wallets are created through `createPaperWallet()`. LIVE creation is rejected with a clear message.
+- `src/wallets/polymarket_wallet.ts`: LIVE trades via the polyUSA SDK (Step F, 2026-11-10); dry-run preview is the default.
+- `src/reporting/dashboard_server.ts`: dashboard creates PAPER wallets via `createPaperWallet()` and LIVE wallets via `WalletManager.createLiveWallet()` when `ENABLE_LIVE_TRADING=true` (otherwise 403 with arm instructions). The create-wallet form accepts optional imported polyUSA API credentials (`polyUsaClientFactory`, in-memory only — never logged/echoed/persisted); blank fields fall back to `.env`. Seed phrases / private keys are intentionally not accepted: polyUSA signs with Ed25519 API keys.
 - Deleted: `fill_simulator.ts`, `slippage_model.ts`, `pnl_tracker.ts`, `test_vwap.ts`.
 
 Done 2026-11-10 (second pass — Steps A, B, C, D, E, G):
@@ -84,7 +84,7 @@ Each step needs its own test before the next one starts.
 - The engine depth check (Step B) adds one CLOB `/book` fetch per entry order. Batch or cache if it becomes hot.
 - Gamma pagination terminates via a 422: the `/markets` endpoint rejects deep offsets (observed at offset 2100), so every poll logs one `Gamma API page request failed` ERROR (status 422, offset 2100) and completes with ~1,807 markets over 21 pages. Pre-existing behavior — the page loop breaks on failure — not a Step C regression. If coverage beyond ~2,100 markets is ever needed, switch to a keyset/date filter instead of offset paging.
 
-- LIVE wallet code is implemented (Step F, 2026-11-10) but cannot send a real order unless `ENABLE_LIVE_TRADING=true` AND `POLYMARKET_DRY_RUN=false` AND the owner has given explicit go-ahead; the default is preview-only dry run. Known gap: the polyUSA `UserPosition` object has no clean YES/NO outcome mapping, so LIVE open positions track this wallet's own fills rather than `portfolio.positions()`.
+- LIVE wallet code is implemented (Step F, 2026-11-10) but cannot send a real order unless `ENABLE_LIVE_TRADING=true` AND `POLYMARKET_DRY_RUN=false` AND the owner has given explicit go-ahead; the default is preview-only dry run. Known gap: the polyUSA `UserPosition` object has no clean YES/NO outcome mapping, so LIVE open positions track this wallet's own fills rather than `portfolio.positions()`. Dashboard LIVE wallet creation is wired (2026-11-10, third pass): armed servers create real `PolymarketWallet`s; imported API credentials live only in the in-memory client factory and are lost on restart by design.
 - The whale scanner may be stuck. Its first batch hadn't finished after about 16 minutes, and `marketsPerScan: 50` doesn't cap the loop.
 - `dashboard_server.ts` is about 257 KB in one file. Split it before major changes.
 - RESOLVED 2026-11-10: owner cancelled the rotation permanently (keys are the polyUSA account keys in `D:\master.env`; exposure concern dropped). `find_fees.ts` (tracked; removed via git rm) and the six `test_*.js` probes (untracked) deleted. Credentials now live only in `.env` / `D:\master.env`.

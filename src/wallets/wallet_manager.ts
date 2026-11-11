@@ -1,5 +1,5 @@
 import { PaperWallet, PaperMarketData } from './paper_wallet';
-import { PolymarketWallet } from './polymarket_wallet';
+import { PolymarketWallet, type PolymarketClientLike } from './polymarket_wallet';
 import { WalletState, WalletConfig, TradeRecord } from '../types';
 import { logger } from '../reporting/logs';
 
@@ -45,6 +45,22 @@ export class WalletManager {
     return new PaperWallet(config, assignedStrategy, () => this.marketData());
   }
 
+  /**
+   * Build a LIVE wallet wired to the shared slug cache (used by the dashboard
+   * and registerWallet). Optional imported polyUSA credentials override the
+   * environment keys; they live only in the wallet's in-memory client factory.
+   */
+  createLiveWallet(
+    config: WalletConfig,
+    assignedStrategy: string,
+    clientFactory?: () => PolymarketClientLike | undefined,
+  ): PolymarketWallet {
+    return new PolymarketWallet(config, assignedStrategy, {
+      resolveSlug: (marketId) => this.marketData()?.stream.getMarket(marketId)?.slug,
+      ...(clientFactory ? { clientFactory } : {}),
+    });
+  }
+
   registerWallet(config: WalletConfig, assignedStrategy: string, enableLive: boolean): void {
     if (this.wallets.has(config.id)) {
       throw new Error(`Wallet ${config.id} already registered`);
@@ -60,9 +76,7 @@ export class WalletManager {
 
     const wallet =
       config.mode === 'LIVE'
-        ? new PolymarketWallet(config, assignedStrategy, {
-            resolveSlug: (marketId) => this.marketData()?.stream.getMarket(marketId)?.slug,
-          })
+        ? this.createLiveWallet(config, assignedStrategy)
         : new PaperWallet(config, assignedStrategy, () => this.marketData());
 
     this.wallets.set(config.id, wallet);

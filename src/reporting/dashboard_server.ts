@@ -1,5 +1,6 @@
 import http from 'http';
 import { WalletManager } from '../wallets/wallet_manager';
+import { polyUsaClientFactory } from '../wallets/polymarket_wallet';
 import { MarketFetcher } from '../data/market_fetcher';
 import { buildDashboardPayload } from './dashboard_api';
 import { listStrategies } from '../strategies/registry';
@@ -845,10 +846,11 @@ export class DashboardServer {
         return;
       }
 
-      if (mode === 'LIVE') {
+      if (mode === 'LIVE' && process.env.ENABLE_LIVE_TRADING !== 'true') {
         json(res, 403, {
           ok: false,
-          error: 'LIVE execution is not implemented yet (CLOB order signing pending). Create PAPER wallets only; no order was sent.',
+          error:
+            'LIVE trading is not armed on this server. Restart with .\\start_bot.ps1 -Live (or set ENABLE_LIVE_TRADING=true in .env). When armed, LIVE wallets still default to preview-only dry run until POLYMARKET_DRY_RUN=false.',
         });
         return;
       }
@@ -864,23 +866,39 @@ export class DashboardServer {
       const maxLoss = Number(body.maxDailyLoss ?? capital * 0.1);
       const maxTrades = Number(body.maxOpenTrades ?? 10);
       const maxDd = Number(body.maxDrawdown ?? 0.2);
+      const riskLimits = {
+        maxPositionSize: maxPos,
+        maxExposurePerMarket: maxExp,
+        maxDailyLoss: maxLoss,
+        maxOpenTrades: maxTrades,
+        maxDrawdown: maxDd,
+      };
 
-      const wallet = this.walletManager.createPaperWallet(
-        {
-          id: walletId,
-          mode: mode === 'LIVE' ? 'LIVE' : 'PAPER',
-          strategy,
-          capital,
-          riskLimits: {
-            maxPositionSize: maxPos,
-            maxExposurePerMarket: maxExp,
-            maxDailyLoss: maxLoss,
-            maxOpenTrades: maxTrades,
-            maxDrawdown: maxDd,
-          },
-        },
-        strategy,
-      );
+      /* Imported polyUSA credentials (in-memory only, never logged or echoed). */
+      const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+      const apiSecret = typeof body.apiSecret === 'string' ? body.apiSecret.trim() : '';
+      const importedCreds = mode === 'LIVE' && apiKey.length > 0 && apiSecret.length > 0;
+      const envCreds = Boolean(process.env.POLYMARKET_API_KEY && process.env.POLYMARKET_API_SECRET);
+      if (mode === 'LIVE' && !importedCreds && !envCreds) {
+        json(res, 400, {
+          ok: false,
+          error:
+            'LIVE wallet needs polyUSA API credentials: import them in the form, or set POLYMARKET_API_KEY / POLYMARKET_API_SECRET in .env. (Seed phrases / private keys are not used — polyUSA signs orders with API keys.)',
+        });
+        return;
+      }
+
+      const wallet =
+        mode === 'LIVE'
+          ? this.walletManager.createLiveWallet(
+              { id: walletId, mode: 'LIVE', strategy, capital, riskLimits },
+              strategy,
+              importedCreds ? polyUsaClientFactory(apiKey, apiSecret) : undefined,
+            )
+          : this.walletManager.createPaperWallet(
+              { id: walletId, mode: 'PAPER', strategy, capital, riskLimits },
+              strategy,
+            );
       this.walletManager.addWallet(wallet);
 
       /* Connect the new wallet to the engine so its strategy runs */
@@ -888,7 +906,13 @@ export class DashboardServer {
         this.engine.addRunner(walletId, strategy);
       }
 
-      json(res, 201, { ok: true, message: `Wallet "${walletId}" created (${mode}, ${strategy}, $${capital})` });
+      const message =
+        mode === 'LIVE'
+          ? `LIVE wallet "${walletId}" created (${strategy}, $${capital}). Fund it with USDC on polymarket.us — balance is read from the exchange. Credentials: ${
+              importedCreds ? 'imported (in-memory)' : 'environment (.env)'
+            }. Orders stay preview-only until POLYMARKET_DRY_RUN=false.`
+          : `Wallet "${walletId}" created (PAPER, ${strategy}, $${capital})`;
+      json(res, 201, { ok: true, message });
       return;
     }
 
@@ -1750,7 +1774,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <div class="form-grid">
       <div class="fg"><label>Wallet ID</label><input id="cw-id" placeholder="e.g. wallet_4"></div>
       <div class="fg"><label>Mode</label>
-        <select id="cw-mode"><option value="PAPER">PAPER (live book, no real orders)</option><option value="LIVE">LIVE (real money)</option></select>
+        <select id="cw-mode"><option value="PAPER">PAPER (live book, no real orders)</option><option value="LIVE">LIVE (real money — preview dry-run by default)</option></select>
       </div>
       <div class="fg"><label>Strategy</label><select id="cw-strategy"></select></div>
       <div class="fg"><label>Capital ($)</label><input id="cw-capital" type="number" min="1" value="500" placeholder="500"></div>
@@ -1758,7 +1782,10 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
       <div class="fg"><label>Max Exposure / Market</label><input id="cw-maxexp" type="number" placeholder="auto"></div>
       <div class="fg"><label>Max Daily Loss</label><input id="cw-maxloss" type="number" placeholder="auto"></div>
       <div class="fg"><label>Max Open Trades</label><input id="cw-maxtrades" type="number" value="10" placeholder="10"></div>
+      <div class="fg" id="cw-cred-key" style="display:none"><label>PolyUSA API Key</label><input id="cw-apikey" placeholder="blank = server .env keys" autocomplete="off" spellcheck="false"></div>
+      <div class="fg" id="cw-cred-secret" style="display:none"><label>PolyUSA API Secret</label><input id="cw-apisecret" type="password" placeholder="blank = server .env keys" autocomplete="off"></div>
     </div>
+    <div id="cw-live-note" class="form-msg" style="display:none;text-align:left">LIVE wallets trade your polymarket.us account: fund with USDC there (balance is read from the exchange). polyUSA signs orders with API keys — seed phrases / private keys are not used. Leave both blank to use the server's .env credentials. Orders stay preview-only until POLYMARKET_DRY_RUN=false.</div>
     <div class="form-actions">
       <button class="btn btn-primary" id="cw-submit">Create Wallet</button>
       <div class="form-msg" id="cw-msg"></div>
@@ -3341,6 +3368,15 @@ async function populateStrategyDropdown(){
   }catch(e){console.error(e)}
 }
 
+function cwToggleCreds(){
+  const live=$('#cw-mode').value==='LIVE';
+  $('#cw-cred-key').style.display=live?'':'none';
+  $('#cw-cred-secret').style.display=live?'':'none';
+  $('#cw-live-note').style.display=live?'':'none';
+}
+$('#cw-mode').addEventListener('change',cwToggleCreds);
+cwToggleCreds();
+
 $('#cw-submit').addEventListener('click',async()=>{
   const body={
     walletId:$('#cw-id').value.trim(),
@@ -3348,6 +3384,12 @@ $('#cw-submit').addEventListener('click',async()=>{
     strategy:$('#cw-strategy').value,
     capital:Number($('#cw-capital').value),
   };
+  if(body.mode==='LIVE'){
+    const k=$('#cw-apikey').value.trim();
+    const s=$('#cw-apisecret').value.trim();
+    if(k)body.apiKey=k;
+    if(s)body.apiSecret=s;
+  }
   const mp=$('#cw-maxpos').value;if(mp)body.maxPositionSize=Number(mp);
   const me=$('#cw-maxexp').value;if(me)body.maxExposurePerMarket=Number(me);
   const ml=$('#cw-maxloss').value;if(ml)body.maxDailyLoss=Number(ml);
@@ -3357,7 +3399,7 @@ $('#cw-submit').addEventListener('click',async()=>{
     const r=await fetch('/api/wallets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json();
     showMsg('cw-msg',j.ok?'ok':'err',j.message||j.error);
-    if(j.ok){$('#cw-id').value='';$('#cw-capital').value='500';refresh()}
+    if(j.ok){$('#cw-id').value='';$('#cw-capital').value='500';$('#cw-apisecret').value='';refresh()}
   }catch(e){showMsg('cw-msg','err','Network error')}
 });
 

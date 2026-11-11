@@ -65,6 +65,20 @@ function defaultClientFactory(): PolymarketClientLike | undefined {
 }
 
 /**
+ * Per-wallet client factory from imported polyUSA credentials (dashboard
+ * "import" path). Credentials stay in this closure — in memory only, never
+ * logged, echoed, or persisted.
+ */
+export function polyUsaClientFactory(keyId: string, secretKey: string): () => PolymarketClientLike | undefined {
+  let cached: PolymarketClientLike | undefined;
+  return () => {
+    if (cached) return cached;
+    cached = new PolymarketUS({ keyId, secretKey });
+    return cached;
+  };
+}
+
+/**
  * LIVE wallet for Polymarket US (api.polymarket.us). Fails closed:
  * 1. Throws unless ENABLE_LIVE_TRADING === 'true'.
  * 2. Throws when POLYMARKET_API_KEY / POLYMARKET_API_SECRET are missing.
