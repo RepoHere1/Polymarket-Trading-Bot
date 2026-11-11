@@ -13,6 +13,8 @@ export interface PerformanceSnapshot {
   profitFactor: number;
   sharpeLike: number;
   totalTrades: number;
+  /** Closed outcomes (SELL trades). Win/loss metrics are meaningless below 1. */
+  closedTrades: number;
 }
 
 export interface WalletDashboardEntry {
@@ -59,10 +61,13 @@ export function computePerformance(
   trades: TradeRecord[],
   unrealizedPnl: number,
 ): PerformanceSnapshot {
-  // Compute real win rate from actual trades
-  const wins = trades.filter((t) => t.realizedPnl > 0);
-  const losses = trades.filter((t) => t.realizedPnl < 0);
-  const closedTrades = wins.length + losses.length;
+  /* Outcome metrics come from SELL trades only. A BUY's realized PnL is just
+     its fee (always ≤ 0) — counting buys as "losses" made holding wallets
+     report 0W/30L while actually being up. Open positions are not outcomes. */
+  const sells = trades.filter((t) => t.side === 'SELL');
+  const wins = sells.filter((t) => t.realizedPnl > 0);
+  const losses = sells.filter((t) => t.realizedPnl < 0);
+  const closedTrades = sells.length;
   const winRate = closedTrades > 0 ? wins.length / closedTrades : 0;
 
   const totalWinPnl = wins.reduce((s, t) => s + t.realizedPnl, 0);
@@ -95,6 +100,7 @@ export function computePerformance(
     profitFactor: profitFactor === Infinity ? 999 : Number(profitFactor.toFixed(4)),
     sharpeLike,
     totalTrades: trades.length,
+    closedTrades,
   };
 }
 
@@ -105,14 +111,22 @@ export function buildDashboardPayload(
   pausedWallets?: Set<string>,
   displayNames?: Map<string, string>,
 ): DashboardPayload {
+  /* marketPrices maps marketId → YES mid. A NO share's price is 1 − yesMid
+     (binary complement). Pricing NO shares with the YES mid inverted PnL. */
+  const priceOf = (marketId: string, outcome: 'YES' | 'NO'): number | undefined => {
+    const yesMid = marketPrices?.get(marketId);
+    if (yesMid === undefined) return undefined;
+    return outcome === 'YES' ? yesMid : 1 - yesMid;
+  };
+
   const entries: WalletDashboardEntry[] = wallets.map((w) => {
     const trades = tradesByWallet.get(w.walletId) ?? [];
 
     // Compute unrealized PnL for each open position (skip zero-size)
     let walletUnrealizedPnl = 0;
     const positions = w.openPositions.filter((p) => p.size > 0).map((p) => {
-      // Use live market price if available, otherwise use avgPrice (no unrealized PnL)
-      const currentPrice = marketPrices?.get(p.marketId) ?? p.avgPrice;
+      // Use the live outcome price if available, otherwise avgPrice (no unrealized PnL)
+      const currentPrice = priceOf(p.marketId, p.outcome) ?? p.avgPrice;
       const unrealizedPnl =
         p.size > 0 && p.avgPrice > 0
           ? (currentPrice - p.avgPrice) * p.size

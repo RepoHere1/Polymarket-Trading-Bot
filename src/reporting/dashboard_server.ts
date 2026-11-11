@@ -70,16 +70,25 @@ interface StrategyCatalogEntry {
    ────────────────────────────────────────────────────────────── */
 import type { WalletState, TradeRecord } from '../types';
 
-function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPrices?: Map<string, number>) {
+export function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPrices?: Map<string, number>) {
   const sorted = [...trades].sort((a, b) => a.timestamp - b.timestamp);
+
+  /* marketPrices maps marketId → YES mid; a NO share prices at 1 − yesMid. */
+  const priceOf = (marketId: string, outcome: 'YES' | 'NO'): number | undefined => {
+    const yesMid = marketPrices?.get(marketId);
+    if (yesMid === undefined) return undefined;
+    return outcome === 'YES' ? yesMid : 1 - yesMid;
+  };
 
   /* ── Basic stats ── */
   const totalTrades = sorted.length;
   const buyTrades = sorted.filter((t) => t.side === 'BUY');
   const sellTrades = sorted.filter((t) => t.side === 'SELL');
-  const wins = sorted.filter((t) => t.realizedPnl > 0);
-  const losses = sorted.filter((t) => t.realizedPnl < 0);
-  const closedTrades = wins.length + losses.length;
+  /* Outcome metrics come from SELL trades only — a BUY's realized PnL is just
+     its fee (always ≤ 0), so counting buys made holding wallets show 0W/30L. */
+  const wins = sellTrades.filter((t) => t.realizedPnl > 0);
+  const losses = sellTrades.filter((t) => t.realizedPnl < 0);
+  const closedTrades = sellTrades.length;
   const winRate = closedTrades > 0 ? wins.length / closedTrades : 0;
   const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.realizedPnl, 0) / wins.length : 0;
   const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + t.realizedPnl, 0) / losses.length : 0;
@@ -117,7 +126,7 @@ function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPri
   let longestLossStreak = 0;
   let ws = 0;
   let ls = 0;
-  for (const t of sorted) {
+  for (const t of sellTrades) {
     if (t.realizedPnl > 0) { ws++; ls = 0; longestWinStreak = Math.max(longestWinStreak, ws); }
     else if (t.realizedPnl < 0) { ls++; ws = 0; longestLossStreak = Math.max(longestLossStreak, ls); }
   }
@@ -185,7 +194,7 @@ function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPri
       availableBalance: round(wallet.availableBalance),
       realizedPnl: round(wallet.realizedPnl),
       openPositions: wallet.openPositions.map((p) => {
-        const currentPrice = marketPrices?.get(p.marketId) ?? p.avgPrice;
+        const currentPrice = priceOf(p.marketId, p.outcome) ?? p.avgPrice;
         const uPnl = p.size > 0 && p.avgPrice > 0 ? (currentPrice - p.avgPrice) * p.size : 0;
         return {
           marketId: p.marketId,
@@ -216,15 +225,15 @@ function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPri
       longestLossStreak,
       currentStreak,
       unrealizedPnl: round(wallet.openPositions.reduce((sum, p) => {
-        const cp = marketPrices?.get(p.marketId) ?? p.avgPrice;
+        const cp = priceOf(p.marketId, p.outcome) ?? p.avgPrice;
         return sum + (p.size > 0 && p.avgPrice > 0 ? (cp - p.avgPrice) * p.size : 0);
       }, 0)),
       totalPnl: round(wallet.realizedPnl + wallet.openPositions.reduce((sum, p) => {
-        const cp = marketPrices?.get(p.marketId) ?? p.avgPrice;
+        const cp = priceOf(p.marketId, p.outcome) ?? p.avgPrice;
         return sum + (p.size > 0 && p.avgPrice > 0 ? (cp - p.avgPrice) * p.size : 0);
       }, 0)),
       roi: round4((wallet.realizedPnl + wallet.openPositions.reduce((sum, p) => {
-        const cp = marketPrices?.get(p.marketId) ?? p.avgPrice;
+        const cp = priceOf(p.marketId, p.outcome) ?? p.avgPrice;
         return sum + (p.size > 0 && p.avgPrice > 0 ? (cp - p.avgPrice) * p.size : 0);
       }, 0)) / Math.max(1, wallet.capitalAllocated)),
     },
@@ -2577,9 +2586,9 @@ function renderWallets(wl){
       '<div class="m-cell"><div class="m-label">Realized</div><div class="m-val '+pnlCls(p.realizedPnl)+'">$'+fmt(p.realizedPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Unrealized</div><div class="m-val '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Total PnL</div><div class="m-val '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
-      '<div class="m-cell"><div class="m-label">Win Rate</div><div class="m-val">'+(p.totalTrades>0?pct(p.winRate):'N/A')+'</div></div>'+
-      '<div class="m-cell"><div class="m-label">Trades</div><div class="m-val">'+p.totalTrades+' <span style="font-size:10px;color:var(--muted)">('+p.winCount+'W/'+p.lossCount+'L)</span></div></div>'+
-      '<div class="m-cell"><div class="m-label">Profit Factor</div><div class="m-val">'+(p.profitFactor>=999?'\u221E':fmt(p.profitFactor,1))+'</div></div></div>'+
+      '<div class="m-cell"><div class="m-label">Win Rate</div><div class="m-val">'+(p.closedTrades>0?pct(p.winRate):'N/A')+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">Trades</div><div class="m-val">'+p.totalTrades+' <span style="font-size:10px;color:var(--muted)">('+p.closedTrades+' closed: '+p.winCount+'W/'+p.lossCount+'L)</span></div></div>'+
+      '<div class="m-cell"><div class="m-label">Profit Factor</div><div class="m-val">'+(p.closedTrades>0?(p.profitFactor>=999?'\u221E':fmt(p.profitFactor,1)):'\u2014')+'</div></div></div>'+
       '<div class="risk-sec"><div class="r-title">Risk Utilization</div><div class="risk-bars">'+
       '<div class="rb-row"><span class="rb-label">Capital Used</span><div class="rb-track"><div class="rb-fill '+barCls(capR)+'" style="width:'+(capR*100).toFixed(1)+'%"></div></div><span class="rb-val">'+pct(capR)+'</span></div>'+
       '<div class="rb-row"><span class="rb-label">Daily Loss</span><div class="rb-track"><div class="rb-fill '+barCls(lossR)+'" style="width:'+(lossR*100).toFixed(1)+'%"></div></div><span class="rb-val">'+pct(lossR)+'</span></div>'+
@@ -2684,7 +2693,7 @@ function renderWalletDetail(d){
     ['Win Rate',s.closedTrades>0?pct(s.winRate):'N/A',s.winRate>=0.5?'pnl-pos':'pnl-neg'],
     ['Avg Win','$'+fmt(s.avgWin),'pnl-pos'],
     ['Avg Loss','$'+fmt(Math.abs(s.avgLoss)),'pnl-neg'],
-    ['Profit Factor',s.profitFactor==='Infinity'?'\\u221E':fmt(s.profitFactor,1),''],
+    ['Profit Factor',s.closedTrades>0?(s.profitFactor==='Infinity'?'\\u221E':fmt(s.profitFactor,1)):'N/A',''],
     ['Max Drawdown','$'+fmt(s.maxDrawdown)+' ('+pct(s.maxDrawdownPct)+')','pnl-neg'],
     ['Largest Win','$'+fmt(s.largestWin),'pnl-pos'],
     ['Largest Loss','$'+fmt(Math.abs(s.largestLoss)),'pnl-neg'],
