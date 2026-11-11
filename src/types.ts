@@ -1,4 +1,5 @@
-export type TradingMode = 'LIVE' | 'PAPER';
+/** 'LIVE_LANE' = budget sub-allocation ("lane") on an existing LIVE account wallet. */
+export type TradingMode = 'LIVE' | 'PAPER' | 'LIVE_LANE';
 
 export interface RiskLimits {
   maxPositionSize: number;

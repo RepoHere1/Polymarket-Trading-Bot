@@ -1,6 +1,6 @@
 export interface WalletRecord {
   walletId: string;
-  mode: 'LIVE' | 'PAPER';
+  mode: 'LIVE' | 'PAPER' | 'LIVE_LANE';
   strategy: string;
   capitalAllocated: number;
 }

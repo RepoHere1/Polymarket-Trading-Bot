@@ -18,7 +18,7 @@ export interface PerformanceSnapshot {
 export interface WalletDashboardEntry {
   walletId: string;
   displayName: string;
-  mode: 'LIVE' | 'PAPER';
+  mode: 'LIVE' | 'PAPER' | 'LIVE_LANE';
   strategy: string;
   capitalAllocated: number;
   availableBalance: number;

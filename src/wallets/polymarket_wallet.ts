@@ -40,6 +40,12 @@ export interface PolymarketWalletDeps {
   clientFactory?: () => PolymarketClientLike | undefined;
   /** Resolves the bot's Gamma marketId to a market slug using the shared live cache. */
   resolveSlug?: (marketId: string) => string | undefined;
+  /**
+   * Budget cap (USD) — makes this wallet a "lane" on a shared LIVE account.
+   * Spendable balance becomes min(account buying power, budget − spent).
+   * Must equal config.capital. Lanes share the parent account's client.
+   */
+  budgetCap?: number;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
 }
@@ -87,6 +93,9 @@ export function polyUsaClientFactory(keyId: string, secretKey: string): () => Po
  * 4. Reports a fill only when the exchange response contains executions. No executions → null.
  * 5. Balance is exchange truth (account.balances()). Positions are this wallet's own fills;
  *    the API position object has no clean YES/NO mapping yet (known gap).
+ * 5b. Lanes (deps.budgetCap): budget sub-allocation on a SHARED account. The lane reports
+ *     min(account buying power, budget − spent) so several lanes can share one account
+ *     without any of them seeing (or spending) the full balance.
  * 6. Trades only markets whose slug exists in the polyUSA catalog (verified, cached).
  */
 export class PolymarketWallet {
@@ -94,6 +103,12 @@ export class PolymarketWallet {
   private readonly trades: TradeRecord[] = [];
   private readonly slugCache = new Map<string, string | null>();
   private lastBalanceRefresh = 0;
+  /** Set when this wallet is a lane: hard spending cap (budget) on a shared account. */
+  private readonly budgetCap?: number;
+  /** Lane ledger remaining: budget − spent + sale proceeds. Undefined semantics for plain LIVE wallets. */
+  private ledgerAvailable = 0;
+  /** Last exchange-reported USD buying power of the underlying account. */
+  private exchangeUsd?: number;
 
   constructor(
     config: WalletConfig,
@@ -102,7 +117,7 @@ export class PolymarketWallet {
   ) {
     this.state = {
       walletId: config.id,
-      mode: 'LIVE',
+      mode: deps.budgetCap !== undefined ? 'LIVE_LANE' : 'LIVE',
       assignedStrategy,
       capitalAllocated: config.capital,
       availableBalance: config.capital,
@@ -116,6 +131,8 @@ export class PolymarketWallet {
         maxDrawdown: config.riskLimits?.maxDrawdown ?? 0.2,
       },
     };
+    this.budgetCap = deps.budgetCap;
+    this.ledgerAvailable = config.capital;
   }
 
   getState(): WalletState {
@@ -141,7 +158,13 @@ export class PolymarketWallet {
       const res = await client.account.balances();
       const usd = res.balances.filter((b) => b.currency === 'USD');
       if (usd.length > 0) {
-        this.state.availableBalance = usd.reduce((sum, b) => sum + (b.buyingPower ?? b.currentBalance ?? 0), 0);
+        const total = usd.reduce((sum, b) => sum + (b.buyingPower ?? b.currentBalance ?? 0), 0);
+        this.exchangeUsd = total;
+        if (this.budgetCap !== undefined) {
+          this.syncCappedBalance();
+        } else {
+          this.state.availableBalance = total;
+        }
         this.lastBalanceRefresh = now;
       }
     } catch (err) {
@@ -150,6 +173,40 @@ export class PolymarketWallet {
         throw new Error(`LIVE ${this.state.walletId}: account balance unavailable (${msg}) — refusing to trade`);
       }
       logger.warn({ walletId: this.state.walletId, error: msg }, 'LIVE balance refresh failed; keeping last known');
+    }
+  }
+
+  /** Lane wallets report min(exchange buying power, budget remaining) — never the full account. */
+  private syncCappedBalance(): void {
+    const cap = this.exchangeUsd ?? Number.POSITIVE_INFINITY;
+    this.state.availableBalance = Math.max(0, Math.min(cap, this.ledgerAvailable));
+  }
+
+  /** Apply a fill's cash effect to both the raw ledger and the reported balance. */
+  private applyBalanceDelta(delta: number): void {
+    this.ledgerAvailable += delta;
+    this.state.availableBalance += delta;
+    if (this.budgetCap !== undefined) this.syncCappedBalance();
+  }
+
+  /**
+   * Real account USD buying power straight from the exchange (shared account
+   * truth, used by lane budget checks and the dashboard). Null when unreadable.
+   */
+  async getExchangeUsdBalance(): Promise<number | null> {
+    const client = this.client();
+    if (!client) return null;
+    try {
+      const res = await client.account.balances();
+      const usd = res.balances.filter((b) => b.currency === 'USD');
+      if (usd.length === 0) return null;
+      const total = usd.reduce((sum, b) => sum + (b.buyingPower ?? b.currentBalance ?? 0), 0);
+      this.exchangeUsd = total;
+      this.lastBalanceRefresh = this.deps.now?.() ?? Date.now();
+      if (this.budgetCap !== undefined) this.syncCappedBalance();
+      return total;
+    } catch {
+      return null;
     }
   }
 
@@ -241,12 +298,12 @@ export class PolymarketWallet {
           realizedPnl: 0,
         });
       }
-      this.state.availableBalance -= notional + fill.fee;
+      this.applyBalanceDelta(-(notional + fill.fee));
     } else if (pos) {
       realized = (fill.price - pos.avgPrice) * fill.size;
       pos.size -= fill.size;
       pos.realizedPnl += realized;
-      this.state.availableBalance += notional - fill.fee;
+      this.applyBalanceDelta(notional - fill.fee);
       if (pos.size <= 1e-9) {
         this.state.openPositions = this.state.openPositions.filter((p) => p !== pos);
       }
@@ -314,6 +371,18 @@ export class PolymarketWallet {
     if (quantity < 1) {
       logger.warn({ walletId, marketId: request.marketId, size: request.size }, 'LIVE order dropped: size below one share');
       return null;
+    }
+
+    /* Lanes can never spend past their budget, whatever the account holds. */
+    if (this.budgetCap !== undefined && request.side === 'BUY') {
+      const cost = request.price * quantity;
+      if (cost > this.state.availableBalance) {
+        logger.warn(
+          { walletId, marketId: request.marketId, cost, available: this.state.availableBalance, budget: this.budgetCap },
+          'LIVE lane order dropped: cost exceeds lane budget remaining',
+        );
+        return null;
+      }
     }
 
     const params: CreateOrderParams = {
