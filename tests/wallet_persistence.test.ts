@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
+import Database from 'better-sqlite3';
 import { WalletStore } from '../src/storage/wallet_store';
 import { PaperWallet } from '../src/wallets/paper_wallet';
 import { WalletManager } from '../src/wallets/wallet_manager';
@@ -65,6 +66,7 @@ describe('WalletStore — PAPER wallet persistence', () => {
       riskLimits,
       trades: [trade()],
       paused: true,
+      source: 'dashboard',
     });
     store1.close();
 
@@ -98,6 +100,7 @@ describe('WalletStore — PAPER wallet persistence', () => {
       riskLimits,
       trades: [] as TradeRecord[],
       paused: false,
+      source: 'dashboard',
     };
     store.savePaperWallet({ ...base, balance: 500 });
     store.savePaperWallet({ ...base, balance: 432.1, displayName: 'Renamed' });
@@ -122,9 +125,64 @@ describe('WalletStore — PAPER wallet persistence', () => {
       riskLimits,
       trades: [],
       paused: false,
+      source: 'dashboard',
     });
     store.deleteWallet('gone');
     expect(store.listPaperWallets().length).toBe(0);
+    store.close();
+  });
+
+  it('source round-trips: dashboard vs config rows keep their identity', () => {
+    const store = new WalletStore(TEST_DB);
+    const base = {
+      displayName: 'X',
+      strategy: 'momentum',
+      capital: 100,
+      balance: 100,
+      realizedPnl: 0,
+      openPositions: [],
+      riskLimits,
+      trades: [] as TradeRecord[],
+      paused: false,
+    };
+    store.savePaperWallet({ ...base, walletId: 'ui_wallet', source: 'dashboard' });
+    store.savePaperWallet({ ...base, walletId: 'config_wallet', source: 'config' });
+
+    const rows = store.listPaperWallets();
+    expect(rows.find((r) => r.walletId === 'ui_wallet')?.source).toBe('dashboard');
+    expect(rows.find((r) => r.walletId === 'config_wallet')?.source).toBe('config');
+    store.close();
+  });
+
+  it('legacy DB without a source column migrates rows as config (pause-flag only)', () => {
+    // Hand-build a pre-source v1 database, exactly like the 2026-11-11 morning file
+    const legacy = new Database(TEST_DB);
+    legacy.exec(`
+      CREATE TABLE paper_wallets (
+        wallet_id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        capital REAL NOT NULL,
+        balance REAL NOT NULL,
+        realized_pnl REAL NOT NULL,
+        open_positions TEXT NOT NULL,
+        risk_limits TEXT NOT NULL,
+        trades TEXT NOT NULL,
+        paused INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    legacy
+      .prepare('INSERT INTO paper_wallets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('legacy_1', 'Legacy', 'momentum', 100, 90, 0, '[]', JSON.stringify(riskLimits), '[]', 1, Date.now());
+    legacy.close();
+
+    // Opening the store runs the v2 migration
+    const store = new WalletStore(TEST_DB);
+    const rows = store.listPaperWallets();
+    expect(rows.length).toBe(1);
+    expect(rows[0].source).toBe('config'); // pre-source rows were config wallet snapshots
+    expect(rows[0].paused).toBe(true);
     store.close();
   });
 });
@@ -190,6 +248,7 @@ describe('PaperWallet — snapshot restore + persistence hook', () => {
         riskLimits: s.riskLimits,
         trades: w1.getTradeHistory(),
         paused: false,
+        source: 'dashboard',
       });
     };
     w1.attachPersistence(persist);

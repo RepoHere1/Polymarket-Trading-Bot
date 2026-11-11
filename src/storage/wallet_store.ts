@@ -30,6 +30,14 @@ export interface PersistedPaperWallet {
   riskLimits: RiskLimits;
   trades: TradeRecord[];
   paused: boolean;
+  /**
+   * Where the row came from — decides restore semantics:
+   * - 'dashboard': wallet born in the UI → FULL state is restored on boot and
+   *   the wallet is recreated if missing (created once, stays forever).
+   * - 'config': config.yaml wallet → only the operator's pause choice is
+   *   restored; the row can NEVER resurrect a wallet removed from config.yaml.
+   */
+  source: 'dashboard' | 'config';
 }
 
 export class WalletStore {
@@ -52,17 +60,25 @@ export class WalletStore {
         risk_limits    TEXT    NOT NULL,
         trades         TEXT    NOT NULL,
         paused         INTEGER NOT NULL DEFAULT 0,
-        updated_at     INTEGER NOT NULL
+        updated_at     INTEGER NOT NULL,
+        source         TEXT    NOT NULL DEFAULT 'dashboard'
       );
     `);
+    /* v2 migration — older DBs have no `source` column. Every pre-source row
+       was a pause/balance snapshot of a config.yaml wallet, so they migrate
+       as 'config' (pause-flag only, never resurrected). */
+    const cols = this.db.prepare('PRAGMA table_info(paper_wallets)').all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'source')) {
+      this.db.exec("ALTER TABLE paper_wallets ADD COLUMN source TEXT NOT NULL DEFAULT 'config'");
+    }
   }
 
   savePaperWallet(w: PersistedPaperWallet): void {
     this.db.prepare(`
       INSERT INTO paper_wallets
         (wallet_id, display_name, strategy, capital, balance, realized_pnl,
-         open_positions, risk_limits, trades, paused, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         open_positions, risk_limits, trades, paused, updated_at, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(wallet_id) DO UPDATE SET
         display_name   = excluded.display_name,
         strategy       = excluded.strategy,
@@ -73,7 +89,8 @@ export class WalletStore {
         risk_limits    = excluded.risk_limits,
         trades         = excluded.trades,
         paused         = excluded.paused,
-        updated_at     = excluded.updated_at
+        updated_at     = excluded.updated_at,
+        source         = excluded.source
     `).run(
       w.walletId,
       w.displayName,
@@ -86,6 +103,7 @@ export class WalletStore {
       JSON.stringify(w.trades),
       w.paused ? 1 : 0,
       Date.now(),
+      w.source,
     );
   }
 
@@ -107,6 +125,7 @@ export class WalletStore {
         risk_limits: string;
         trades: string;
         paused: number;
+        source: string;
       }>;
     return rows.map((r) => ({
       walletId: r.wallet_id,
@@ -119,6 +138,7 @@ export class WalletStore {
       riskLimits: JSON.parse(r.risk_limits) as RiskLimits,
       trades: JSON.parse(r.trades) as TradeRecord[],
       paused: r.paused === 1,
+      source: r.source === 'dashboard' ? 'dashboard' : 'config',
     }));
   }
 

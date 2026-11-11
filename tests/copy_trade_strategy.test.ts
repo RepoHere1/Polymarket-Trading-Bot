@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { CopyTradeStrategy, DEFAULT_COPY_TRADE_CONFIG, CopyTradeConfig } from '../src/strategies/copy_trading/copy_trade_strategy';
+import { CopyTradeStrategy, DEFAULT_COPY_TRADE_CONFIG, CopyTradeConfig, syncTrackedWhalesIntoCopyTrade } from '../src/strategies/copy_trading/copy_trade_strategy';
 import { MarketData, WalletState } from '../src/types';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -47,6 +47,26 @@ function mkWallet(overrides: Partial<WalletState> = {}): WalletState {
     ...overrides,
   };
 }
+
+describe('syncTrackedWhalesIntoCopyTrade — whale tracker → copy bridge', () => {
+  it('adds tracked whales to every instance, skips duplicates and blanks, is idempotent', () => {
+    const a = new CopyTradeStrategy();
+    const b = new CopyTradeStrategy();
+    a.initialize({ wallet: mkWallet(), config: {} });
+    b.initialize({ wallet: mkWallet(), config: {} });
+
+    const added = syncTrackedWhalesIntoCopyTrade([a, b], [WHALE_A.toUpperCase(), '  ', WHALE_B]);
+    expect(added).toBe(4); // 2 whales × 2 instances
+
+    expect(a.getWhaleAddresses().sort()).toEqual([WHALE_A, WHALE_B].sort());
+    expect(b.getWhaleAddresses().length).toBe(2);
+
+    // syncing the same whales again must add nothing
+    expect(syncTrackedWhalesIntoCopyTrade([a, b], [WHALE_A, WHALE_B])).toBe(0);
+    // blank entries are ignored
+    expect(syncTrackedWhalesIntoCopyTrade([a], ['', '   '])).toBe(0);
+  });
+});
 
 /** Build a mock data-api response for whale trades */
 function mkApiTrades(trades: Array<{

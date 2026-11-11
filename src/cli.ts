@@ -15,6 +15,7 @@ import { logger } from './reporting/logs';
 import { DashboardServer } from './reporting/dashboard_server';
 import { WhaleService } from './whales/whale_service';
 import { WhaleAPI } from './whales/whale_api';
+import { CopyTradeStrategy, syncTrackedWhalesIntoCopyTrade } from './strategies/copy_trading/copy_trade_strategy';
 import { DEFAULT_WHALE_CONFIG, DEFAULT_SCANNER_CONFIG, DEFAULT_API_POOL_CONFIG, DEFAULT_FAST_SCAN_CONFIG, DEFAULT_EXCHANGE_SOURCES } from './whales/whale_types';
 import type { WhaleTrackingConfig, ScannerConfig } from './whales/whale_types';
 
@@ -199,10 +200,11 @@ program
       minLiquidity: whaleConfig.scanner.minMarketLiquidityUsd,
       minVolume24h: whaleConfig.scanner.minMarketVolume24hUsd,
     }, 'Whale config loaded');
+    let whaleService: WhaleService | undefined;
     if (whaleConfig.enabled) {
       const clobApi = config.polymarket?.clobApi ?? 'https://clob.polymarket.com';
       const gammaApi = config.polymarket?.gammaApi ?? 'https://gamma-api.polymarket.com';
-      const whaleService = new WhaleService(whaleConfig, clobApi, gammaApi);
+      whaleService = new WhaleService(whaleConfig, clobApi, gammaApi);
       const whaleApi = new WhaleAPI(whaleService);
       dashboardServer.setWhaleApi(whaleApi);
       whaleService.start();
@@ -218,6 +220,32 @@ program
     await engine.initialize();
     dashboardServer.setEngine(engine);
     engine.start();
+
+    /* Whale Tracking → copy-trade bridge: every whale the tracking engine
+       promotes is pushed into ALL copy_trade runners (PAPER and LIVE), so the
+       strategies follow the same real whales the tracker qualified — no
+       manual address bookkeeping. The strategies still poll the real Data
+       API for those addresses and only fill against real books. */
+    if (whaleService) {
+      const syncWhales = () => {
+        try {
+          const { whales } = whaleService!.listWhales({ trackingEnabled: true, limit: 1000 });
+          const instances = engine
+            .getStrategiesByName('copy_trade')
+            .filter((s): s is CopyTradeStrategy => s instanceof CopyTradeStrategy);
+          const added = syncTrackedWhalesIntoCopyTrade(instances, whales.map((w) => w.address));
+          if (added > 0) {
+            logger.info(
+              { added, totalTracked: whales.length, copyInstances: instances.length },
+              'Tracked whales synced into copy_trade runners',
+            );
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Whale→copy_trade sync failed (will retry next interval)');
+        }
+      };
+      setInterval(syncWhales, 60_000);
+    }
 
     writeState({ status: 'running', startedAt: new Date().toISOString() });
   });

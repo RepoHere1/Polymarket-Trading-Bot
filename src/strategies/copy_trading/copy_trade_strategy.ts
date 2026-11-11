@@ -763,8 +763,13 @@ export class CopyTradeStrategy extends BaseStrategy {
 
   private buildConfig(raw: Record<string, unknown>): CopyTradeConfig {
     const d = DEFAULT_COPY_TRADE_CONFIG;
+    /* Array fields are CLONED — every instance owns its lists. Without this,
+       addWhaleAddress() on one runner mutated the shared default/config array
+       and silently appeared on every other copy_trade runner. */
+    const arr = (v: unknown, fallback: string[]): string[] =>
+      Array.isArray(v) ? [...(v as string[])] : [...fallback];
     return {
-      whale_addresses: (raw.whale_addresses as string[]) ?? d.whale_addresses,
+      whale_addresses: arr(raw.whale_addresses, d.whale_addresses),
       copy_mode: (raw.copy_mode as 'mirror' | 'inverse') ?? d.copy_mode,
       data_api_url: (raw.data_api_url as string) ?? d.data_api_url,
       poll_interval_seconds: (raw.poll_interval_seconds as number) ?? d.poll_interval_seconds,
@@ -789,8 +794,8 @@ export class CopyTradeStrategy extends BaseStrategy {
       trailing_stop_distance_bps: (raw.trailing_stop_distance_bps as number) ?? d.trailing_stop_distance_bps,
       time_exit_minutes: (raw.time_exit_minutes as number) ?? d.time_exit_minutes,
       exit_on_whale_exit: (raw.exit_on_whale_exit as boolean) ?? d.exit_on_whale_exit,
-      blacklist_markets: (raw.blacklist_markets as string[]) ?? d.blacklist_markets,
-      whitelist_markets: (raw.whitelist_markets as string[]) ?? d.whitelist_markets,
+      blacklist_markets: arr(raw.blacklist_markets, d.blacklist_markets),
+      whitelist_markets: arr(raw.whitelist_markets, d.whitelist_markets),
       min_market_liquidity: (raw.min_market_liquidity as number) ?? d.min_market_liquidity,
       min_market_volume_24h: (raw.min_market_volume_24h as number) ?? d.min_market_volume_24h,
     };
@@ -863,4 +868,28 @@ export class CopyTradeStrategy extends BaseStrategy {
   override shutdown(): void {
     logger.info({ strategy: this.name, totalCopied: this.getTotalTradesCopied() }, 'Copy Trade strategy shutdown');
   }
+}
+
+/* ━━━━━━━━━━━━━━ Whale Tracking → copy-trade bridge ━━━━━━━━━━━━━━ */
+
+/**
+ * Push the Whale Tracking Engine's tracked addresses into every copy_trade
+ * instance (PAPER and LIVE runners alike) so the strategies poll the real
+ * Data API for exactly those whales. Idempotent — addresses already followed
+ * are skipped, and manual whale_addresses from config.yaml stay in effect.
+ * Returns how many addresses were added across all instances.
+ */
+export function syncTrackedWhalesIntoCopyTrade(
+  instances: CopyTradeStrategy[],
+  trackedAddresses: string[],
+): number {
+  const tracked = trackedAddresses.map((a) => a.toLowerCase().trim()).filter(Boolean);
+  let added = 0;
+  for (const inst of instances) {
+    const current = inst.getWhaleAddresses().map((a) => a.toLowerCase());
+    for (const addr of tracked) {
+      if (!current.includes(addr) && inst.addWhaleAddress(addr)) added++;
+    }
+  }
+  return added;
 }

@@ -82,6 +82,39 @@ describe('dashboard performance metrics are outcome-based (SELLs only)', () => {
   });
 });
 
+describe('dashboard summary — running wallets and LIVE capital truth', () => {
+  it('activeWallets counts only RUNNING runners; totalWallets counts everything', () => {
+    const payload = buildDashboardPayload(
+      [state({ walletId: 'w1' }), state({ walletId: 'w2' }), state({ walletId: 'w3' })],
+      new Map([['w1', []], ['w2', []], ['w3', []]]),
+      undefined,
+      new Set(['w2']), // paused
+      undefined,
+      new Set(['w1']), // running = runner attached AND not paused
+    );
+    expect(payload.totalWallets).toBe(3);
+    expect(payload.activeWallets).toBe(1); // only w1 runs; w2 is paused, w3 has no runner
+  });
+
+  it('without running info every wallet counts (back-compat)', () => {
+    const payload = buildDashboardPayload([state()], new Map([['w1', []]]));
+    expect(payload.activeWallets).toBe(1);
+    expect(payload.totalWallets).toBe(1);
+  });
+
+  it('LIVE capital is the exchange balance, not the configured number', () => {
+    const payload = buildDashboardPayload(
+      [
+        state({ walletId: 'live1', mode: 'LIVE', capitalAllocated: 100, availableBalance: 250.5 }),
+        state({ walletId: 'paper1', capitalAllocated: 1000, availableBalance: 900 }),
+      ],
+      new Map([['live1', []], ['paper1', []]]),
+    );
+    // 250.5 (exchange truth for the LIVE wallet) + 1000 (paper capital)
+    expect(payload.totalCapital).toBeCloseTo(1250.5, 4);
+  });
+});
+
 describe('dashboard NO positions price at 1 − YES mid', () => {
   const positions = [
     { marketId: 'mNO', outcome: 'NO' as const, size: 10, avgPrice: 0.6, realizedPnl: 0 },

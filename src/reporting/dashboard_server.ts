@@ -1,6 +1,7 @@
 import http from 'http';
+import path from 'path';
 import { WalletManager } from '../wallets/wallet_manager';
-import { polyUsaClientFactory } from '../wallets/polymarket_wallet';
+import { polyUsaClientFactory, PolymarketWallet } from '../wallets/polymarket_wallet';
 import { PaperWallet } from '../wallets/paper_wallet';
 import { WalletStore } from '../storage/wallet_store';
 import { MarketFetcher } from '../data/market_fetcher';
@@ -705,10 +706,20 @@ export class DashboardServer {
   private readonly walletDisplayNames = new Map<string, string>();
   /** LIVE walletId → polyUSA API keyId it trades with (keyId only — never the secret). */
   private readonly liveApiKeyByWallet = new Map<string, string>();
-  /** SQLite persistence for dashboard-created PAPER wallets (survive restarts). */
+  /** SQLite persistence for PAPER wallets (dashboard wallets survive restarts). */
   private walletStore?: WalletStore;
-  /** Restored wallets awaiting engine runner attachment (engine attaches after start()). */
-  private pendingRestoredRunners: Array<{ walletId: string; strategy: string; paused: boolean }> = [];
+  /** Wallets born in the dashboard — full-state persistence; config.yaml wallets persist pause-only. */
+  private readonly dashboardWalletIds = new Set<string>();
+  /** Runner operations deferred until the engine is wired (engine attaches after start()). */
+  private pendingRestoredRunners: Array<{
+    walletId: string;
+    strategy: string;
+    paused: boolean;
+    /** false = config.yaml wallet whose runner already exists — only the pause flag is applied. */
+    attachRunner: boolean;
+  }> = [];
+  /** Periodic LIVE balance refresh so every surface shows exchange truth. */
+  private liveBalanceTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly walletManager: WalletManager,
@@ -724,14 +735,44 @@ export class DashboardServer {
     /* Attach strategy runners for wallets restored from disk — the engine is
        wired AFTER dashboardServer.start(), so restoration had to defer these. */
     for (const r of this.pendingRestoredRunners) {
-      this.attachRestoredRunner(r.walletId, r.strategy, r.paused);
+      this.attachRestoredRunner(r.walletId, r.strategy, r.paused, r.attachRunner);
     }
     this.pendingRestoredRunners = [];
   }
 
   private store(): WalletStore {
-    this.walletStore ??= new WalletStore(process.env.WALLETS_DB_PATH ?? '.runtime/wallets.db');
+    if (!this.walletStore) {
+      /* Anchor the default DB to the repo root (this file lives in
+         <root>/src|dist/reporting) so a different process CWD can never
+         split the wallet DB in two. WALLETS_DB_PATH still overrides. */
+      const dbPath = process.env.WALLETS_DB_PATH
+        ? path.resolve(process.env.WALLETS_DB_PATH)
+        : path.resolve(__dirname, '..', '..', '.runtime', 'wallets.db');
+      this.walletStore = new WalletStore(dbPath);
+    }
     return this.walletStore;
+  }
+
+  /** Wallets whose strategy runner is attached AND not paused — the "X of Y" the header reports. */
+  private getRunningWalletIds(): Set<string> {
+    if (!this.engine) return new Set();
+    const paused = this.engine.getPausedWallets();
+    return new Set(this.engine.listRunnerWalletIds().filter((id) => !paused.has(id)));
+  }
+
+  /** Refresh LIVE wallet balances from the exchange (TTL-guarded inside the wallet). */
+  private async refreshLiveBalances(): Promise<void> {
+    for (const state of this.walletManager.listWallets()) {
+      if (state.mode !== 'LIVE' && state.mode !== 'LIVE_LANE') continue;
+      const wallet = this.walletManager.getWallet(state.walletId);
+      if (wallet instanceof PolymarketWallet) {
+        try {
+          await wallet.refreshState();
+        } catch {
+          /* refreshState(force=false) keeps the last known balance on failure. */
+        }
+      }
+    }
   }
 
   /** Snapshot a PAPER wallet (state + trades + name + paused) into SQLite. No-op for other modes. */
@@ -751,14 +792,42 @@ export class DashboardServer {
       riskLimits: state.riskLimits,
       trades: this.walletManager.getTradeHistory(walletId),
       paused: this.engine?.isRunnerPaused(walletId) ?? false,
+      source: this.dashboardWalletIds.has(walletId) ? 'dashboard' : 'config',
     });
   }
 
-  /** Rehydrate dashboard-created PAPER wallets from SQLite so they survive restarts. */
+  /** Rehydrate PAPER wallets from SQLite so they survive restarts. */
   private restorePersistedWallets(): void {
     const persisted = this.store().listPaperWallets();
+    let restoredCount = 0;
     for (const p of persisted) {
-      if (this.walletManager.getWallet(p.walletId)) continue; // config.yaml wallet wins over a stale row
+      const existing = this.walletManager.getWallet(p.walletId);
+
+      if (existing) {
+        /* A config.yaml wallet with the same id ALWAYS wins over the row.
+           A dashboard row colliding with config is dropped (config is truth);
+           a config row survives only to restore the operator's pause choice. */
+        if (p.source === 'dashboard') {
+          this.store().deleteWallet(p.walletId);
+        } else if (p.paused) {
+          this.pendingRestoredRunners.push({
+            walletId: p.walletId,
+            strategy: existing.getState().assignedStrategy,
+            paused: true,
+            attachRunner: false,
+          });
+        }
+        continue;
+      }
+
+      if (p.source === 'config') {
+        /* The wallet is gone from config.yaml — the row must NOT resurrect it. */
+        this.store().deleteWallet(p.walletId);
+        logger.info({ walletId: p.walletId }, 'Stale config wallet row deleted (wallet removed from config.yaml)');
+        continue;
+      }
+
+      /* Dashboard-created wallet: created once, restored forever. */
       const wallet = this.walletManager.createPaperWallet(
         { id: p.walletId, mode: 'PAPER', strategy: p.strategy, capital: p.capital, riskLimits: p.riskLimits },
         p.strategy,
@@ -774,27 +843,25 @@ export class DashboardServer {
       wallet.attachPersistence(() => this.persistPaperWallet(p.walletId));
       this.walletManager.addWallet(wallet);
       this.walletDisplayNames.set(p.walletId, p.displayName);
-      if (this.engine) {
-        this.attachRestoredRunner(p.walletId, p.strategy, p.paused);
-      } else {
-        this.pendingRestoredRunners.push({ walletId: p.walletId, strategy: p.strategy, paused: p.paused });
-      }
+      this.dashboardWalletIds.add(p.walletId);
+      this.pendingRestoredRunners.push({ walletId: p.walletId, strategy: p.strategy, paused: p.paused, attachRunner: true });
+      restoredCount++;
       logger.info(
         { walletId: p.walletId, strategy: p.strategy, balance: p.balance, trades: p.trades.length },
         'PAPER wallet restored from disk',
       );
     }
-    if (persisted.length > 0) {
-      consoleLog.success('WALLET', `Restored ${persisted.length} persisted PAPER wallet(s) from disk`, {
-        count: persisted.length,
-        wallets: persisted.map((p) => p.walletId),
+    if (restoredCount > 0) {
+      consoleLog.success('WALLET', `Restored ${restoredCount} persisted PAPER wallet(s) from disk`, {
+        count: restoredCount,
+        wallets: persisted.filter((p) => this.dashboardWalletIds.has(p.walletId)).map((p) => p.walletId),
       });
     }
   }
 
-  private attachRestoredRunner(walletId: string, strategy: string, paused: boolean): void {
+  private attachRestoredRunner(walletId: string, strategy: string, paused: boolean, attachRunner = true): void {
     if (!this.engine) return;
-    this.engine.addRunner(walletId, strategy);
+    if (attachRunner) this.engine.addRunner(walletId, strategy);
     if (paused) this.engine.pauseRunner(walletId);
   }
 
@@ -821,6 +888,12 @@ export class DashboardServer {
 
     /* Bring dashboard-created PAPER wallets back from disk before serving. */
     this.restorePersistedWallets();
+
+    /* Keep LIVE wallet balances fresh — every surface (list, detail, totals)
+       shows the exchange's number, not the configured one. */
+    this.liveBalanceTimer = setInterval(() => {
+      void this.refreshLiveBalances();
+    }, 15_000);
 
     this.server = http.createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -856,6 +929,7 @@ export class DashboardServer {
         this.getLiveMarketPrices(),
         this.engine?.getPausedWallets(),
         this.walletDisplayNames,
+        this.getRunningWalletIds(),
       );
       const data = `event: dashboard\ndata: ${JSON.stringify(payload)}\n\n`;
       for (const client of this.sseClients) {
@@ -880,6 +954,10 @@ export class DashboardServer {
     if (!this.server) return;
     this.server.close();
     this.server = undefined;
+    if (this.liveBalanceTimer) {
+      clearInterval(this.liveBalanceTimer);
+      this.liveBalanceTimer = null;
+    }
     this.walletStore?.close();
     this.walletStore = undefined;
   }
@@ -908,6 +986,7 @@ export class DashboardServer {
         this.getLiveMarketPrices(),
         this.engine?.getPausedWallets(),
         this.walletDisplayNames,
+        this.getRunningWalletIds(),
       ));
       return;
     }
@@ -1091,6 +1170,7 @@ export class DashboardServer {
       /* Persist PAPER wallets so they survive restarts. LIVE wallets hold
          in-memory credentials by design and are intentionally not persisted. */
       if (wallet instanceof PaperWallet) {
+        this.dashboardWalletIds.add(walletId);
         wallet.attachPersistence(() => this.persistPaperWallet(walletId));
         this.persistPaperWallet(walletId);
       }
@@ -1117,6 +1197,7 @@ export class DashboardServer {
         return;
       }
       this.liveApiKeyByWallet.delete(walletId);
+      this.dashboardWalletIds.delete(walletId);
       this.walletStore?.deleteWallet(walletId); // forget persisted PAPER wallets too
       if (this.engine) {
         this.engine.removeRunner(walletId);
@@ -1541,6 +1622,7 @@ export class DashboardServer {
         this.getLiveMarketPrices(),
         this.engine?.getPausedWallets(),
         this.walletDisplayNames,
+        this.getRunningWalletIds(),
       );
       res.write(`event: dashboard\ndata: ${JSON.stringify(payload)}\n\n`);
       return;
@@ -2632,7 +2714,7 @@ function renderSummary(d){
   const uPnl = d.totalUnrealizedPnl || 0;
   const tPnl = d.totalPnl || 0;
   $('#summary').innerHTML=
-    '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+'</div></div>'+
+    '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+' <span style="font-size:12px;opacity:.65">of '+(d.totalWallets ?? d.activeWallets)+'</span></div></div>'+
     '<div class="s-card"><div class="label">Total Capital</div><div class="value">$'+fmt(d.totalCapital,0)+'</div></div>'+
     '<div class="s-card"><div class="label">Realized PnL</div><div class="value '+pnlCls(rPnl)+'">$'+fmt(rPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Unrealized PnL</div><div class="value '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+

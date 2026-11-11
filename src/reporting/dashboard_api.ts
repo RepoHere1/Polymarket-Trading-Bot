@@ -52,7 +52,10 @@ export interface DashboardPayload {
   totalPnl: number;
   totalRealizedPnl: number;
   totalUnrealizedPnl: number;
+  /** Wallets whose strategy runner is attached AND not paused (the "X of Y" in the header). */
   activeWallets: number;
+  /** All wallets known to the manager (running, paused, or runner-less). */
+  totalWallets: number;
   wallets: WalletDashboardEntry[];
 }
 
@@ -110,6 +113,8 @@ export function buildDashboardPayload(
   marketPrices?: Map<string, number>,
   pausedWallets?: Set<string>,
   displayNames?: Map<string, string>,
+  /** Wallets whose runner is attached and NOT paused — omitted → every wallet counts. */
+  runningWalletIds?: Set<string>,
 ): DashboardPayload {
   /* marketPrices maps marketId → YES mid. A NO share's price is 1 − yesMid
      (binary complement). Pricing NO shares with the YES mid inverted PnL. */
@@ -162,13 +167,24 @@ export function buildDashboardPayload(
   const totalRealizedPnl = entries.reduce((s, e) => s + e.realizedPnl, 0);
   const totalUnrealizedPnl = entries.reduce((s, e) => s + e.unrealizedPnl, 0);
 
+  /* LIVE capital is exchange truth (availableBalance, refreshed from the
+     exchange), not the configured number. LIVE_LANE keeps its budget — a lane
+     can never spend past it even if the shared account holds more. */
+  const totalCapital = entries.reduce(
+    (s, e) => s + (e.mode === 'LIVE' ? e.availableBalance : e.capitalAllocated),
+    0,
+  );
+
   return {
     generatedAt: new Date().toISOString(),
-    totalCapital: entries.reduce((s, e) => s + e.capitalAllocated, 0),
+    totalCapital,
     totalPnl: Number((totalRealizedPnl + totalUnrealizedPnl).toFixed(4)),
     totalRealizedPnl: Number(totalRealizedPnl.toFixed(4)),
     totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
-    activeWallets: entries.length,
+    activeWallets: runningWalletIds
+      ? entries.filter((e) => runningWalletIds.has(e.walletId)).length
+      : entries.length,
+    totalWallets: entries.length,
     wallets: entries,
   };
 }

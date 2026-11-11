@@ -191,6 +191,11 @@ export class Engine {
     return this.runners.length;
   }
 
+  /** IDs of wallets that currently have a strategy runner (running OR paused). */
+  listRunnerWalletIds(): string[] {
+    return this.runners.map((r) => r.walletId);
+  }
+
   /** Get all strategy instances that match a given strategy name (for runtime config). */
   getStrategiesByName(strategyName: string): StrategyInterface[] {
     return this.runners
