@@ -1025,8 +1025,26 @@ export class DashboardServer {
         }
       }
 
+      /* Available balance (PAPER only — a LIVE wallet's balance is owned by the exchange) */
+      if (body.balance !== undefined) {
+        const bal = Number(body.balance);
+        if (!Number.isFinite(bal) || bal < 0) {
+          json(res, 400, { ok: false, error: 'balance must be a finite number >= 0' });
+          return;
+        }
+        if (typeof wallet.setBalance !== 'function') {
+          json(res, 403, {
+            ok: false,
+            error: `Wallet "${walletId}" is LIVE — its balance is owned by the exchange and cannot be set manually. Fund it with USDC on polymarket.us.`,
+          });
+          return;
+        }
+        wallet.setBalance(bal);
+        changes.push(`balance → $${bal}`);
+      }
+
       if (changes.length === 0) {
-        json(res, 400, { ok: false, error: 'No valid fields to update. Supported: displayName, riskLimits' });
+        json(res, 400, { ok: false, error: 'No valid fields to update. Supported: displayName, riskLimits, balance' });
         return;
       }
 
@@ -2676,6 +2694,16 @@ function renderWalletDetail(d){
     '<div class="ws-actions"><button class="btn" onclick="saveRiskLimits(\\''+w.walletId+'\\')">Save Risk Limits</button><span id="ws-risk-msg" class="ws-msg" style="display:none"></span></div>'+
     '</div>';
 
+  /* Paper Balance override (PAPER only — LIVE balance is exchange truth) */
+  if(w.mode==='PAPER'){
+    html+='<div class="ws-section"><h3>\uD83D\uDCB0 Paper Balance</h3>'+
+      '<div class="ws-form-grid">'+
+      '<div class="ws-field"><label>Set Available Balance ($)</label><input type="number" id="ws-balance" value="'+w.availableBalance+'" min="0" step="1"><div class="hint">Instantly sets this paper wallet\u2019s cash balance to any value. Positions and trade history are kept.</div></div>'+
+      '</div>'+
+      '<div class="ws-actions"><button class="btn" onclick="saveBalance(\\''+w.walletId+'\\')">Set Balance</button><span id="ws-balance-msg" class="ws-msg" style="display:none"></span></div>'+
+      '</div>';
+  }
+
   /* Wallet Performance Summary (read-only) */
   html+='<div class="ws-section"><h3>\uD83D\uDCCA Performance Snapshot</h3>'+
     '<div class="ws-form-grid">'+
@@ -2695,7 +2723,19 @@ function renderWalletDetail(d){
 
   html+='</div>'; /* /settings */
 
+  /* Preserve a focused input across the 2s auto-refresh so typing is not clobbered */
+  const ae=document.activeElement;
+  let focusInfo=null;
+  if(ae&&ae.id&&(ae.tagName==='INPUT'||ae.tagName==='SELECT')){focusInfo={id:ae.id,value:ae.value,ss:ae.selectionStart,se:ae.selectionEnd}}
   document.getElementById('wd-content').innerHTML=html;
+  if(focusInfo){
+    const fel=document.getElementById(focusInfo.id);
+    if(fel&&fel.tagName==='INPUT'&&!fel.disabled){
+      fel.value=focusInfo.value;
+      try{fel.focus()}catch(e){}
+      try{fel.setSelectionRange(focusInfo.ss,focusInfo.se)}catch(e){}
+    }
+  }
 
   /* ── Render SVG charts (only if overview tab is active) ── */
   if(wdActiveTab==='overview'){
@@ -2751,6 +2791,17 @@ async function saveRiskLimits(walletId){
     const j=await r.json();
     showWsMsg('ws-risk-msg',j.ok?'ok':'err',j.message||j.error);
   }catch(e){showWsMsg('ws-risk-msg','err','Network error')}
+}
+
+async function saveBalance(walletId){
+  const el=document.getElementById('ws-balance');
+  const v=parseFloat(el&&el.value);
+  if(isNaN(v)||v<0){showWsMsg('ws-balance-msg','err','Balance must be a number >= 0');return}
+  try{
+    const r=await fetch('/api/wallets/'+encodeURIComponent(walletId),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({balance:v})});
+    const j=await r.json();
+    showWsMsg('ws-balance-msg',j.ok?'ok':'err',j.message||j.error);
+  }catch(e){showWsMsg('ws-balance-msg','err','Network error')}
 }
 
 async function deleteWalletFromDetail(walletId){

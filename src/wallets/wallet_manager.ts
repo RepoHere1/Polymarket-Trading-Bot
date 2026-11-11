@@ -18,6 +18,8 @@ export interface ExecutionWallet {
     size: number;
   }): Promise<OrderFill | null>;
   updateBalance(delta: number): void;
+  /** Optional: set the cash balance to an explicit value (PAPER wallets only). */
+  setBalance?(value: number): void;
   /** Optional display name for the dashboard (defaults to walletId) */
   getDisplayName?(): string;
   setDisplayName?(name: string): void;

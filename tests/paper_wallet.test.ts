@@ -94,3 +94,21 @@ describe('PaperWallet (real book fills)', () => {
     ).rejects.toThrow(/refusing to simulate/);
   });
 });
+
+describe('PaperWallet.setBalance (dashboard override)', () => {
+  it('sets the available cash balance to any explicit value', () => {
+    const w = wallet(undefined);
+    w.setBalance(10000);
+    expect(w.getState().availableBalance).toBe(10000);
+    w.setBalance(0);
+    expect(w.getState().availableBalance).toBe(0);
+  });
+
+  it('rejects negative and non-finite values', () => {
+    const w = wallet(undefined);
+    expect(() => w.setBalance(-5)).toThrow(/finite number/);
+    expect(() => w.setBalance(Number.NaN)).toThrow(/finite number/);
+    expect(() => w.setBalance(Number.POSITIVE_INFINITY)).toThrow(/finite number/);
+    expect(w.getState().availableBalance).toBe(1000);
+  });
+});

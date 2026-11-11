@@ -65,6 +65,19 @@ export class PaperWallet {
     this.state.availableBalance += delta;
   }
 
+  /**
+   * Set the paper cash balance to an explicit value (dashboard override).
+   * Positions and trade history are kept; only the cash figure changes.
+   * Rejects non-finite or negative values.
+   */
+  setBalance(value: number): void {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(`PAPER ${this.state.walletId}: balance must be a finite number >= 0 (got ${value})`);
+    }
+    this.state.availableBalance = value;
+    logger.info({ walletId: this.state.walletId, balance: value }, 'PAPER cash balance set manually (dashboard)');
+  }
+
   getDisplayName(): string {
     return this.displayName;
   }
