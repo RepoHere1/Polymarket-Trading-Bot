@@ -692,6 +692,8 @@ export class DashboardServer {
   private sseClients: Set<http.ServerResponse> = new Set();
   private sseInterval?: ReturnType<typeof setInterval>;
   private readonly walletDisplayNames = new Map<string, string>();
+  /** LIVE walletId → polyUSA API keyId it trades with (keyId only — never the secret). */
+  private readonly liveApiKeyByWallet = new Map<string, string>();
 
   constructor(
     private readonly walletManager: WalletManager,
@@ -888,6 +890,22 @@ export class DashboardServer {
         return;
       }
 
+      /* One LIVE wallet per exchange account: two wallets on the same API key
+         would each see (and each spend) the account's full balance. */
+      const liveKeyId = importedCreds ? apiKey : process.env.POLYMARKET_API_KEY ?? '';
+      if (mode === 'LIVE' && liveKeyId) {
+        const clash = [...this.liveApiKeyByWallet.entries()].find(
+          ([id, key]) => key === liveKeyId && id !== walletId,
+        );
+        if (clash) {
+          json(res, 409, {
+            ok: false,
+            error: `LIVE wallet "${clash[0]}" already trades this polymarket.us account (same API key). Use ONE LIVE wallet per account: two wallets sharing an account each see (and each spend) the account's full balance, so combined orders can overdraw it. For a second LIVE wallet, create a separate polymarket.us account and import its API keys.`,
+          });
+          return;
+        }
+      }
+
       const wallet =
         mode === 'LIVE'
           ? this.walletManager.createLiveWallet(
@@ -900,6 +918,9 @@ export class DashboardServer {
               strategy,
             );
       this.walletManager.addWallet(wallet);
+      if (mode === 'LIVE' && liveKeyId) {
+        this.liveApiKeyByWallet.set(walletId, liveKeyId);
+      }
 
       /* Connect the new wallet to the engine so its strategy runs */
       if (this.engine) {
@@ -919,6 +940,7 @@ export class DashboardServer {
     /* ─── JSON: delete wallet ─── */
     if (path.startsWith('/api/wallets/') && !path.includes('/detail') && !path.includes('/pause') && !path.includes('/resume') && method === 'DELETE') {
       const walletId = decodeURIComponent(path.slice('/api/wallets/'.length));
+      this.liveApiKeyByWallet.delete(walletId);
       if (this.engine) {
         this.engine.removeRunner(walletId);
       }
@@ -1803,7 +1825,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
       <div class="fg" id="cw-cred-key" style="display:none"><label>PolyUSA API Key</label><input id="cw-apikey" placeholder="blank = server .env keys" autocomplete="off" spellcheck="false"></div>
       <div class="fg" id="cw-cred-secret" style="display:none"><label>PolyUSA API Secret</label><input id="cw-apisecret" type="password" placeholder="blank = server .env keys" autocomplete="off"></div>
     </div>
-    <div id="cw-live-note" class="form-msg" style="display:none;text-align:left">LIVE wallets trade your polymarket.us account: fund with USDC there (balance is read from the exchange). polyUSA signs orders with API keys — seed phrases / private keys are not used. Leave both blank to use the server's .env credentials. Orders stay preview-only until POLYMARKET_DRY_RUN=false.</div>
+    <div id="cw-live-note" class="form-msg" style="display:none;text-align:left">LIVE wallets trade your polymarket.us account: fund with USDC there (balance is read from the exchange). polyUSA signs orders with API keys — seed phrases / private keys are not used, so "importing a wallet" = pasting that account's API key + secret below (create keys in your polymarket.us account under Developer/API settings). Leave both blank to use the server's .env credentials. ONE LIVE wallet per polymarket.us account — two wallets sharing an account would each spend its full balance. Orders stay preview-only until POLYMARKET_DRY_RUN=false.</div>
     <div class="form-actions">
       <button class="btn btn-primary" id="cw-submit">Create Wallet</button>
       <div class="form-msg" id="cw-msg"></div>
