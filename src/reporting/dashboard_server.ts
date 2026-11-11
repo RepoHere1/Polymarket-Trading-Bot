@@ -987,7 +987,9 @@ export class DashboardServer {
 
     /* ─── HTML pages ─── */
     if (path === '/' || path === '/dashboard') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      /* no-store: the dashboard ships as one inline HTML+JS blob; a cached
+         copy would hide every UI fix until a manual hard-refresh. */
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store, must-revalidate' });
       res.end(getDashboardHtml());
       return;
     }
@@ -3797,6 +3799,7 @@ function useStrategy(stratId){
   document.querySelector('[data-tab="wallets"]').classList.add('active');
   document.getElementById('pane-wallets').classList.add('active');
   document.getElementById('cw-strategy').value=stratId;
+  cwToggleWhales(); /* programmatic preselect fires NO change event — toggle manually */
   document.getElementById('cw-id').focus();
 }
 
