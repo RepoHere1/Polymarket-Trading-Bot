@@ -1175,6 +1175,33 @@ export class DashboardServer {
         this.persistPaperWallet(walletId);
       }
 
+      /* PROOF OF LIVE WIRE: verify RIGHT NOW that this wallet is connected
+         to the real polymarket.us account — fetch the exchange balance and
+         log it as the factual wiring proof. Fire-and-forget: the response
+         does not wait on the network. */
+      if (wallet instanceof PolymarketWallet) {
+        void wallet
+          .refreshState(true)
+          .then(() => {
+            const usd = wallet.getState().availableBalance;
+            logger.info({ walletId, exchangeUsd: usd }, 'LIVE WIRE VERIFIED — polymarket.us account reachable');
+            consoleLog.success(
+              'WALLET',
+              `LIVE wire VERIFIED for "${walletId}": polymarket.us account reachable, exchange buying power $${usd.toFixed(2)}`,
+              { walletId, exchangeUsd: usd },
+            );
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn({ walletId, err: msg }, 'LIVE wire verification failed (account unreachable right now)');
+            consoleLog.warn(
+              'WALLET',
+              `LIVE wire check for "${walletId}" could not reach polymarket.us yet (${msg}); the wallet stays wired and orders will still be attempted against the exchange`,
+              { walletId },
+            );
+          });
+      }
+
       const message =
         mode === 'LIVE'
           ? `LIVE wallet "${walletId}" created (${strategy}, $${capital}). Fund it with USDC on polymarket.us — balance is read from the exchange. Credentials: ${

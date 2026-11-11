@@ -17,6 +17,14 @@ export interface StrategyInterface {
   managePositions(): Promise<void> | void;
   drainExitOrders(): OrderRequest[];
   shutdown(): Promise<void> | void;
+  /**
+   * OPERATOR LAW HOOK: called by the engine ONLY when the human operator
+   * presses START/RESUME on this wallet's lane in the dashboard.
+   * Implementations MUST clear software self-stops (drawdown pauses, loss
+   * cooldowns) — the operator's START outranks them. No automated path may
+   * ever call this.
+   */
+  onOperatorResume?(): void;
 }
 
 export abstract class BaseStrategy implements StrategyInterface {
@@ -48,6 +56,16 @@ export abstract class BaseStrategy implements StrategyInterface {
   }
 
   onTimer(): void {
+    return;
+  }
+
+  /**
+   * OPERATOR LAW HOOK: no-op default. The engine calls this ONLY when the
+   * human operator presses START/RESUME on this lane. Override to clear
+   * software self-stops (drawdown pauses, cooldowns) — the operator's
+   * START outranks them.
+   */
+  onOperatorResume(): void {
     return;
   }
 

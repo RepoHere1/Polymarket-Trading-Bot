@@ -209,6 +209,9 @@ export class Engine {
    * Pause a wallet's strategy runner.  The runner stays in the list
    * (and still receives market updates to stay in-sync) but will not
    * generate signals, size positions, or place orders.
+   *
+   * OPERATOR LAW: only the operator's dashboard PAUSE button (or restoring
+   * the operator's own persisted pause choice at boot) may call this.
    */
   pauseRunner(walletId: string): boolean {
     if (!this.runners.some((r) => r.walletId === walletId)) return false;
@@ -219,11 +222,26 @@ export class Engine {
 
   /**
    * Resume a previously paused wallet runner.
+   *
+   * OPERATOR LAW: this runs ONLY from the operator's dashboard START button.
+   * The operator's START outranks every software self-stop: the strategy's
+   * internal auto-pauses (e.g. copy-trade drawdown breaker, per-whale loss
+   * cooldowns) are cleared via onOperatorResume() so the lane actually
+   * trades again. No automated path may call this.
    */
   resumeRunner(walletId: string): boolean {
     if (!this.pausedWallets.has(walletId)) return false;
     this.pausedWallets.delete(walletId);
-    consoleLog.success('ENGINE', `Runner resumed: ${walletId}`, { walletId });
+    const runner = this.runners.find((r) => r.walletId === walletId);
+    if (typeof runner?.strategy.onOperatorResume === 'function') {
+      try {
+        runner.strategy.onOperatorResume();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error({ walletId, err: msg }, 'onOperatorResume hook failed (lane still resumed)');
+      }
+    }
+    consoleLog.success('ENGINE', `Runner resumed by OPERATOR: ${walletId} — software self-stops cleared`, { walletId });
     return true;
   }
 
@@ -240,6 +258,7 @@ export class Engine {
   private tickCount = 0;
   private marketUpdateCount = 0;
   private lastScanLog = 0;
+  private lastMarketErrLog = 0;
 
   private async tick(): Promise<void> {
     this.tickCount++;
@@ -251,9 +270,29 @@ export class Engine {
     }
 
     for (const runner of this.runners) {
-      if (this.pausedWallets.has(runner.walletId)) continue;  // skip paused
-      runner.strategy.onTimer();
-      await this.processSignals(runner);
+      /* OPERATOR LAW: a lane the operator paused never trades. */
+      if (this.pausedWallets.has(runner.walletId)) continue;
+
+      /* OPERATOR LAW: a crashing strategy must never take other lanes down
+         with it. Before 2026-11-11 one throwing runner aborted the whole
+         tick, silently starving every wallet below it in this list — a lane
+         "turning off" without the operator's permission. Each runner is now
+         isolated: the error is logged and the lane stays attached (only the
+         operator may pause or remove it). */
+      try {
+        runner.strategy.onTimer();
+        await this.processSignals(runner);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(
+          { walletId: runner.walletId, strategy: runner.strategy.name, err: msg },
+          'Strategy runner error isolated — lane stays up per operator law',
+        );
+        consoleLog.error('ENGINE', `[${runner.strategy.name}] Runner error on ${runner.walletId} isolated — lane stays up (operator law): ${msg}`, {
+          walletId: runner.walletId,
+          strategy: runner.strategy.name,
+        });
+      }
     }
   }
 
@@ -270,8 +309,22 @@ export class Engine {
       this.lastScanLog = now;
     }
 
+    /* Per-runner isolation (operator law): one bad strategy must not block
+       market data for the others. Error log throttled to 1/30 s. */
     for (const runner of this.runners) {
-      runner.strategy.onMarketUpdate(data);
+      try {
+        runner.strategy.onMarketUpdate(data);
+      } catch (err: unknown) {
+        const now = Date.now();
+        if (now - this.lastMarketErrLog > 30_000) {
+          this.lastMarketErrLog = now;
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error(
+            { walletId: runner.walletId, strategy: runner.strategy.name, err: msg },
+            'onMarketUpdate error isolated — other lanes keep receiving data',
+          );
+        }
+      }
     }
   }
 

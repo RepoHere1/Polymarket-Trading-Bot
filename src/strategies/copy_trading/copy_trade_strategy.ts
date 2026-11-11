@@ -824,6 +824,33 @@ export class CopyTradeStrategy extends BaseStrategy {
     };
   }
 
+  /**
+   * OPERATOR LAW: the operator's START button outranks this strategy's
+   * software self-stops. Clears the drawdown circuit breaker and every
+   * per-whale consecutive-loss cooldown so the lane trades again
+   * immediately. Called only by engine.resumeRunner (dashboard START).
+   */
+  override onOperatorResume(): void {
+    let clearedWhales = 0;
+    for (const perf of this.whalePerf.values()) {
+      if (perf.pausedUntil > 0 || perf.consecutiveLosses > 0) {
+        perf.pausedUntil = 0;
+        perf.consecutiveLosses = 0;
+        clearedWhales++;
+      }
+    }
+    const wasDrawdownPaused = this.drawdownPaused;
+    this.drawdownPaused = false;
+    if (wasDrawdownPaused || clearedWhales > 0) {
+      consoleLog.success(
+        'STRATEGY',
+        `[copy_trade] OPERATOR RESUME — self-stops cleared (drawdown breaker: ${
+          wasDrawdownPaused ? 'cleared' : 'not set'
+        }, loss-cooldown whales cleared: ${clearedWhales})`,
+      );
+    }
+  }
+
   /* ━━━━━━━━━━━━━━ Runtime whale address management ━━━━━━━━━━━━━━ */
 
   /** Add a whale address at runtime. Returns false if already tracked. */
