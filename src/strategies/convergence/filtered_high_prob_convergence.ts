@@ -248,12 +248,12 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       positionUsd = Math.max(positionUsd, 1); // minimum $1
 
       /* Kelly-fraction cap: don't bet more than edge / odds implies */
-      const kellyFraction = this.computeKellyFraction(market, score);
+      const kellyFraction = this.computeKellyFraction(market, score, order.outcome);
       const kellyMax = capital * kellyFraction;
       positionUsd = Math.min(positionUsd, kellyMax);
 
       /* Convert USD to shares at the entry price */
-      const entryPrice = this.computeEntryPrice(market, order.side);
+      const entryPrice = this.computeEntryPrice(market, order.side, order.outcome);
       const shares = Math.floor(positionUsd / entryPrice);
       if (shares < 1) continue;
 
@@ -343,8 +343,9 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       const market = this.markets.get(pos.marketId);
       if (!market) continue;
 
-      const currentMid = market.midPrice;
-      const entryBps = ((currentMid - pos.entryPrice) / pos.entryPrice) * 10_000;
+      /* Price THIS position's outcome — market.midPrice is the YES book; NO = 1 − YES mid */
+      const currentPrice = this.priceOfOutcome(market, pos.outcome);
+      const entryBps = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 10_000;
       const hoursHeld = (now - pos.entryTime) / 3_600_000;
 
       /* ── Update trailing peak ── */
@@ -400,22 +401,25 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       /* ── Spread widening near resolution ── */
       if (!exitReason && market.endDate) {
         const daysLeft = (new Date(market.endDate).getTime() - now) / 86_400_000;
-        const spreadBps = (market.spread / market.midPrice) * 10_000;
+        const spreadBps = (market.spread / Math.max(0.001, currentPrice)) * 10_000;
         if (daysLeft < 1 && spreadBps > this.cfg.max_spread_bps * 2) {
           exitReason = `NEAR_RESOLUTION_SPREAD_WIDEN (${daysLeft.toFixed(1)}d left, ${spreadBps.toFixed(0)} bps spread)`;
         }
       }
 
-      /* ── Adverse momentum exit: price reversing strongly against us ── */
+      /* ── Adverse momentum exit: price reversing strongly against us ──
+         priceCache tracks the YES token — for a NO position the adverse
+         direction is inverted (YES rallying = NO collapsing). */
       if (!exitReason && entryBps < 0) {
         const clobId = market.clobTokenIds[0];
         if (clobId) {
           const hist = this.priceCache.get(clobId) ?? [];
           if (hist.length >= 10) {
             const recent5 = hist.slice(-5);
-            const recentMomentum = (recent5[recent5.length - 1].price - recent5[0].price) / Math.max(0.001, recent5[0].price);
-            if (recentMomentum < -0.02 && entryBps < -50) {
-              exitReason = `ADVERSE_MOMENTUM (bps=${entryBps.toFixed(0)}, move=${(recentMomentum * 100).toFixed(1)}%)`;
+            const yesMomentum = (recent5[recent5.length - 1].price - recent5[0].price) / Math.max(0.001, recent5[0].price);
+            const moveVsPosition = pos.outcome === 'YES' ? yesMomentum : -yesMomentum;
+            if (moveVsPosition < -0.02 && entryBps < -50) {
+              exitReason = `ADVERSE_MOMENTUM (bps=${entryBps.toFixed(0)}, move=${(moveVsPosition * 100).toFixed(1)}%)`;
             }
           }
         }
@@ -423,7 +427,7 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
 
       if (exitReason) {
         toClose.push(pos);
-        const pnl = (currentMid - pos.entryPrice) * pos.size;
+        const pnl = (currentPrice - pos.entryPrice) * pos.size;
         this.dailyPnl += pnl;
         this.weeklyPnl += pnl;
 
@@ -433,7 +437,7 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
           marketId: pos.marketId,
           outcome: pos.outcome,
           side: 'SELL',
-          price: currentMid,
+          price: currentPrice,
           size: pos.size,
           strategy: this.name,
         });
@@ -463,7 +467,7 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       const actualSell = Math.min(sellShares, pos.size - 1);
       if (actualSell < 1) continue;
       const market = this.markets.get(pos.marketId);
-      const sellPrice = market?.midPrice ?? pos.entryPrice;
+      const sellPrice = market ? this.priceOfOutcome(market, pos.outcome) : pos.entryPrice;
       const pnl = (sellPrice - pos.entryPrice) * actualSell;
       pos.size -= actualSell;
       pos.costBasis = pos.entryPrice * pos.size;
@@ -645,16 +649,23 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
 
   /* ─── F) Flow / Pressure Confirmation (rule-based) ─── */
   private filterFlowPressure(m: MarketData): FilterResult {
-    /* Orderbook imbalance from bid / ask levels */
-    const bidSize = m.bid * m.liquidity;   // approximate bid-side depth
-    const askSize = (1 - m.ask) * m.liquidity; // approximate ask-side depth
-    const total = bidSize + askSize;
-    const imbalance = total > 0 ? (bidSize - askSize) / total : 0;
+    /* Orderbook imbalance from bid / ask levels — measured on the side the
+       strategy would actually trade. m.bid/m.ask are the YES book, so the
+       two depth proxies are the YES bid side and the NO bid side
+       (NO bid = 1 − YES ask). For a NO-leading market the sign flips:
+       pressure on the traded (NO) side is what confirms the entry. */
+    const yesDepth = m.bid * m.liquidity;       // YES-side bid depth proxy
+    const noDepth = (1 - m.ask) * m.liquidity;  // NO-side bid depth proxy
+    const total = yesDepth + noDepth;
+    const rawImbalance = total > 0 ? (yesDepth - noDepth) / total : 0;
+    const tradeNo = m.midPrice < 0.5;
+    const imbalance = tradeNo ? -rawImbalance : rawImbalance;
 
     const imbalanceOk = imbalance >= this.cfg.min_imbalance;
 
-    /* Net buy flow proxy: if price has been trending up over the flow window,
-       approximate net buy flow from price × volume. */
+    /* Net buy flow proxy: if the TRADED outcome's price has been trending up
+       over the flow window, approximate net buy flow from price × volume.
+       priceCache tracks the YES token — NO moves opposite to YES. */
     const clobId = m.clobTokenIds[0];
     let flowOk = false;
     if (clobId) {
@@ -662,7 +673,8 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       const cutoff = Date.now() - this.cfg.flow_lookback_minutes * 60_000;
       const recent = history.filter((p) => p.timestamp >= cutoff);
       if (recent.length >= 2) {
-        const priceMove = recent[recent.length - 1].price - recent[0].price;
+        const yesMove = recent[recent.length - 1].price - recent[0].price;
+        const priceMove = tradeNo ? -yesMove : yesMove;
         // Rough net flow estimate: price move × volume / # samples
         const netFlowEstimate = priceMove * m.volume24h / Math.max(1, recent.length);
         flowOk = netFlowEstimate >= this.cfg.min_net_buy_flow_usd;
@@ -785,42 +797,58 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      KELLY FRACTION — conservative half-Kelly sizing cap
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-  private computeKellyFraction(_m: MarketData, score: SetupScore): number {
-    const impliedProb = Math.max(_m.midPrice, 1 - _m.midPrice);
+  private computeKellyFraction(m: MarketData, score: SetupScore, outcome: 'YES' | 'NO' = 'YES'): number {
+    const impliedProb = Math.max(m.midPrice, 1 - m.midPrice);
     const winProb = Math.min(0.95, impliedProb + score.value * 0.05);
-    const entryPrice = _m.bid + 0.001;
+    /* Entry price of the outcome we would actually buy — passive bid + tick
+       on that outcome's own book (NO book = complement of the YES book). */
+    const entryPrice = outcome === 'YES' ? m.bid + 0.001 : 1 - m.ask + 0.001;
     const b = (1 - entryPrice) / Math.max(0.01, entryPrice);
     const kelly = Math.max(0, (b * winProb - (1 - winProb)) / b);
     return Math.min(0.05, kelly * 0.5); // half-Kelly, cap at 5% of capital
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     OUTCOME PRICING — midPrice/bid/ask are the YES book
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+  /** True mid of a specific outcome. NO price = 1 − YES price. */
+  private priceOfOutcome(m: MarketData, outcome: 'YES' | 'NO'): number {
+    return outcome === 'YES' ? m.midPrice : 1 - m.midPrice;
+  }
+
+  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      ENTRY PRICE — VWAP-aware passive limit
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-  private computeEntryPrice(m: MarketData, side: 'BUY' | 'SELL'): number {
-    /* Compute recent VWAP as an anchor */
+  private computeEntryPrice(m: MarketData, side: 'BUY' | 'SELL', outcome: 'YES' | 'NO' = 'YES'): number {
+    /* Compute recent VWAP as an anchor (YES-token history; complement for NO) */
     const clobId = m.clobTokenIds[0];
     let vwap = m.midPrice;
     if (clobId) {
       const hist = this.priceCache.get(clobId) ?? [];
       if (hist.length >= 5) {
         const recent = hist.slice(-20);
-        vwap = recent.reduce((s, p) => s + p.price, 0) / recent.length;
+        const yesVwap = recent.reduce((s, p) => s + p.price, 0) / recent.length;
+        vwap = outcome === 'YES' ? yesVwap : 1 - yesVwap;
       }
     }
 
+    /* This outcome's own book: NO bid = 1 − YES ask, NO ask = 1 − YES bid. */
+    const bid = outcome === 'YES' ? m.bid : 1 - m.ask;
+    const ask = outcome === 'YES' ? m.ask : 1 - m.bid;
+
     if (side === 'BUY') {
-      const passivePrice = m.bid + 0.001;
+      const passivePrice = bid + 0.001;
       const vwapCap = vwap + m.spread * 0.2; // don't overpay relative to VWAP
       let price = Math.min(passivePrice, vwapCap);
       if (this.cfg.allow_take_on_momentum) {
-        price = Math.min(m.ask, price + m.spread * 0.3);
+        price = Math.min(ask, price + m.spread * 0.3);
       }
-      return Math.max(0.01, Math.min(m.ask - 0.001, price));
+      return Math.max(0.01, Math.min(ask - 0.001, price));
     }
     // SELL side
-    const passivePrice = m.ask - 0.001;
-    return Math.max(m.bid + 0.001, passivePrice);
+    const passivePrice = ask - 0.001;
+    return Math.max(bid + 0.001, passivePrice);
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

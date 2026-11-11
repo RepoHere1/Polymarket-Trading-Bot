@@ -594,3 +594,154 @@ describe('FilteredHighProbConvergence — Multi-Market Scanning', () => {
     expect(passedIds).not.toContain('no-date');
   });
 });
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   5. NO-OUTCOME PRICING (exit rules + entry pricing)
+   Regression: exit logic used market.midPrice (the YES book) for BOTH
+   outcomes, so NO positions had inverted stop-loss/take-profit math,
+   wrong realised PnL, and exit SELLs priced on the wrong token.
+   NO's true price = 1 − YES price.
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+describe('FilteredHighProbConvergence — NO-outcome pricing', () => {
+  const STRAT = 'filtered_high_prob_convergence';
+
+  /** Simulate a real fill via the engine callback path (notifyFill) */
+  function openPosition(
+    strategy: FilteredHighProbConvergenceStrategy,
+    market: MarketData,
+    outcome: 'YES' | 'NO',
+    price: number,
+    size: number,
+  ): void {
+    strategy.onMarketUpdate(market);
+    strategy.notifyFill({
+      walletId: 'wallet_test',
+      marketId: market.marketId,
+      outcome,
+      side: 'BUY',
+      price,
+      size,
+      strategy: STRAT,
+    });
+  }
+
+  it('stop-losses a NO position when YES rallies (NO price collapses)', () => {
+    const strategy = createStrategy();
+    // Entered NO at 0.25 when YES mid was 0.75
+    openPosition(strategy, mkMarket({ marketId: 'mkt-no' }), 'NO', 0.25, 100);
+
+    // YES rallies to 0.91 → NO is now 0.09 → −6400 bps, far past the −150 stop.
+    // Old YES-mid math saw (0.91 − 0.25)/0.25 = +264% → booked +$66 "profit".
+    strategy.onMarketUpdate(mkMarket({
+      marketId: 'mkt-no',
+      midPrice: 0.91, bid: 0.90, ask: 0.92,
+      outcomePrices: [0.91, 0.09],
+    }));
+    strategy.managePositions();
+
+    // Position closed…
+    expect(strategy.getManagedPositions().length).toBe(0);
+    // …at a realised LOSS: (0.09 − 0.25) × 100 = −$16
+    expect(strategy.getDrawdownStats().dailyPnl).toBeCloseTo(-16, 1);
+    // Exit SELL priced on the NO book (≈0.09), not the YES mid (0.91)
+    const exits = strategy.drainExitOrders();
+    expect(exits.length).toBe(1);
+    expect(exits[0].outcome).toBe('NO');
+    expect(exits[0].price).toBeCloseTo(0.09, 2);
+  });
+
+  it('takes profit on a NO position when YES sinks (NO price rises)', () => {
+    const strategy = createStrategy();
+    // size 2 so partial-exit branches (size > 2) are skipped → full HARD_TP close
+    openPosition(strategy, mkMarket({ marketId: 'mkt-no2' }), 'NO', 0.25, 2);
+
+    // YES sinks to 0.60 → NO is now 0.40 → +6000 bps ≥ 3×TP(600) → HARD_TP.
+    // Old YES-mid math saw (0.60 − 0.25)/0.25 = +140% and priced the exit at 0.60.
+    strategy.onMarketUpdate(mkMarket({
+      marketId: 'mkt-no2',
+      midPrice: 0.60, bid: 0.59, ask: 0.61,
+      outcomePrices: [0.60, 0.40],
+    }));
+    strategy.managePositions();
+
+    expect(strategy.getManagedPositions().length).toBe(0);
+    // Realised PROFIT: (0.40 − 0.25) × 2 = +$0.30
+    expect(strategy.getDrawdownStats().dailyPnl).toBeCloseTo(0.30, 2);
+    const exits = strategy.drainExitOrders();
+    expect(exits.length).toBe(1);
+    expect(exits[0].price).toBeCloseTo(0.40, 2);
+  });
+
+  it('does NOT stop-loss a NO position when NO is gaining (YES sinking)', () => {
+    const strategy = createStrategy();
+    openPosition(strategy, mkMarket({ marketId: 'mkt-no3' }), 'NO', 0.75, 2);
+
+    // YES mid crashes 0.25 → 0.05 → NO jumps to 0.95 (position +2667 bps).
+    // Old YES-mid math computed (0.05 − 0.75)/0.75 = −9333 bps → STOP_LOSS
+    // while the position was massively in profit.
+    strategy.onMarketUpdate(mkMarket({
+      marketId: 'mkt-no3',
+      midPrice: 0.05, bid: 0.04, ask: 0.06,
+      outcomePrices: [0.05, 0.95],
+    }));
+    strategy.managePositions();
+
+    // Exit happened for the right reason (TP family), booked as a profit:
+    expect(strategy.getDrawdownStats().dailyPnl).toBeCloseTo((0.95 - 0.75) * 2, 2);
+    expect(strategy.getManagedPositions().length).toBe(0);
+    const exits = strategy.drainExitOrders();
+    expect(exits[0].price).toBeCloseTo(0.95, 2);
+  });
+
+  it('partial-exits a NO position at the NO price, not the YES mid', () => {
+    const strategy = createStrategy();
+    openPosition(strategy, mkMarket({ marketId: 'mkt-no4' }), 'NO', 0.25, 99);
+
+    // YES drifts to 0.70 → NO 0.30 → +2000 bps ≥ PARTIAL_1 (100)
+    strategy.onMarketUpdate(mkMarket({
+      marketId: 'mkt-no4',
+      midPrice: 0.70, bid: 0.69, ask: 0.71,
+      outcomePrices: [0.70, 0.30],
+    }));
+    strategy.managePositions();
+
+    const positions = strategy.getManagedPositions();
+    expect(positions.length).toBe(1);        // still open, size reduced
+    expect(positions[0].size).toBe(66);      // 99 − floor(99/3) = 66
+    // Partial PnL on the NO book: (0.30 − 0.25) × 33 = +$1.65
+    // (old YES-mid math booked (0.70 − 0.25) × 33 = +$14.85)
+    expect(strategy.getDrawdownStats().dailyPnl).toBeCloseTo(1.65, 2);
+    const exits = strategy.drainExitOrders();
+    expect(exits.length).toBe(1);
+    expect(exits[0].side).toBe('SELL');
+    expect(exits[0].outcome).toBe('NO');
+    expect(exits[0].size).toBe(33);
+    expect(exits[0].price).toBeCloseTo(0.30, 2);
+  });
+
+  it('sizes a NO entry at the NO book, not the YES book', () => {
+    const strategy = createStrategy();
+    // NO-dominant market: YES mid 0.25 (leading prob 0.75 ∈ band) → signal is NO
+    const noDom = {
+      marketId: 'mkt-nodom',
+      midPrice: 0.25, bid: 0.246, ask: 0.254, spread: 0.008,
+      outcomePrices: [0.25, 0.75],
+    };
+    strategy.onMarketUpdate(mkMarket(noDom));
+    for (let i = 0; i < 5; i++) {
+      strategy.onMarketUpdate(mkMarket({ ...noDom, timestamp: Date.now() - (5 - i) * 60_000 }));
+    }
+
+    const signals = strategy.generateSignals();
+    expect(signals.length).toBeGreaterThanOrEqual(1);
+    expect(signals[0].outcome).toBe('NO');
+
+    const orders = strategy.sizePositions(signals);
+    expect(orders.length).toBeGreaterThanOrEqual(1);
+    expect(orders[0].outcome).toBe('NO');
+    // NO passive bid + tick = (1 − yesAsk 0.254) + 0.001 = 0.747.
+    // Old code bid the YES book (~0.247) for a NO token worth ~0.75 → dead order.
+    expect(orders[0].price).toBeCloseTo(0.747, 3);
+  });
+});
+
