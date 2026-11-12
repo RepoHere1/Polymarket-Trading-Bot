@@ -1344,7 +1344,7 @@ export class DashboardServer {
         if (clash) {
           json(res, 409, {
             ok: false,
-            error: `LIVE wallet "${clash[0]}" already trades this polymarket.us account (same API key). Use ONE LIVE wallet per account: two wallets sharing an account each see (and each spend) the account's full balance, so combined orders can overdraw it. Want several strategies on this one account? Pause it and add "LIVE Lane" wallets under it instead — each lane gets its own budget.`,
+            error: `LIVE wallet "${clash[0]}" already trades this polymarket.us account (same API key). Use ONE LIVE wallet per account: two wallets sharing an account each see (and each spend) the account's full balance, so combined orders can overdraw it. Want several strategies on this one account? Pick mode "LIVE Lane" in the create form — each lane is one strategy with its own budget (the parent stays paused).`,
           });
           return;
         }
@@ -2358,8 +2358,9 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <div class="form-grid">
       <div class="fg"><label>Wallet ID</label><input id="cw-id" placeholder="e.g. wallet_4"></div>
       <div class="fg"><label>Mode</label>
-        <select id="cw-mode"><option value="PAPER">PAPER (live book, no real orders)</option><option value="LIVE">LIVE (your polymarket.us account - wired immediately)</option></select>
+        <select id="cw-mode"><option value="PAPER">PAPER (live book, no real orders)</option><option value="LIVE">LIVE (your polymarket.us account - wired immediately)</option><option value="LIVE_LANE">LIVE Lane (one strategy with its own budget on your LIVE account)</option></select>
       </div>
+      <div class="fg" id="cw-parent-row" style="display:none;grid-column:1 / -1"><label>LIVE Account (parent wallet)</label><select id="cw-parent"></select><div style="font-size:11px;opacity:.7;margin-top:4px">The parent stays PAUSED and only hosts lanes. Each lane runs ONE strategy with its own budget; the lane's START/PAUSE button turns that strategy on/off.</div></div>
       <div class="fg"><label>Strategy</label><select id="cw-strategy"></select></div>
       <div class="fg"><label>Capital ($)</label><input id="cw-capital" type="number" min="1" value="500" placeholder="500"></div>
       <div class="fg"><label>Max Position Size</label><input id="cw-maxpos" type="number" placeholder="auto"></div>
@@ -2371,6 +2372,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
       <div class="fg" id="cw-cred-secret" style="display:none"><label>PolyUSA API Secret</label><input id="cw-apisecret" type="password" placeholder="blank = server .env keys" autocomplete="off"></div>
     </div>
     <div id="cw-live-note" class="form-msg" style="display:none;text-align:left">LIVE wallets trade your polymarket.us account: fund with USDC there (balance is read from the exchange). polyUSA signs orders with API keys — seed phrases / private keys are not used, so "importing a wallet" = pasting that account's API key + secret below (create keys in your polymarket.us account under Developer/API settings). Leave both blank to use the server's .env credentials. ONE LIVE wallet per polymarket.us account — two wallets sharing an account would each spend its full balance. Orders stay preview-only until POLYMARKET_DRY_RUN=false.</div>
+    <div id="cw-lane-note" class="form-msg" style="display:none;text-align:left">A LIVE Lane is ONE strategy running on your existing LIVE account wallet with its own budget: the lane can never spend past its budget, and its START/PAUSE button turns just that strategy on/off. The parent account wallet must be PAUSED (it either trades itself or hosts lanes — never both). Creating a lane reads the account's real buying power from polymarket.us, so the API keys must be working. Orders stay preview-only until POLYMARKET_DRY_RUN=false.</div>
     <div class="form-actions">
       <button class="btn btn-primary" id="cw-submit">Create Wallet</button>
       <div class="form-msg" id="cw-msg"></div>
@@ -4030,10 +4032,27 @@ function liveUsdCell(w,dec){if(w.mode!=='LIVE')return null;if(w.exchangeSynced&&
 function usdOrSync(w,fallback,dec){const c=liveUsdCell(w,dec);return c!==null?c:('$'+fmt(fallback,dec));}
 function usdTextOrSync(w,fallback,dec){if(w.mode!=='LIVE')return '$'+fmt(fallback,dec);if(w.exchangeSynced&&typeof w.exchangeUsd==='number'&&isFinite(w.exchangeUsd))return '$'+fmt(w.exchangeUsd,dec);return 'syncing...';}
 function cwToggleCreds(){
-  const live=$('#cw-mode').value==='LIVE';
+  const mode=$('#cw-mode').value;
+  const live=mode==='LIVE';
   $('#cw-cred-key').style.display=live?'':'none';
   $('#cw-cred-secret').style.display=live?'':'none';
   $('#cw-live-note').style.display=live?'':'none';
+  const lane=mode==='LIVE_LANE';
+  $('#cw-parent-row').style.display=lane?'':'none';
+  $('#cw-lane-note').style.display=lane?'':'none';
+  if(lane)void cwPopulateParents();
+}
+async function cwPopulateParents(){
+  const sel=$('#cw-parent');
+  try{
+    const d=await (await fetch('/api/data')).json();
+    const lives=(d.wallets||[]).filter(w=>w.mode==='LIVE');
+    if(lives.length===0){sel.innerHTML='<option value="">- no LIVE account wallet yet: create one first (mode LIVE) -</option>';return}
+    sel.innerHTML=lives.map(w=>{
+      const paused=w.paused===true;
+      return '<option value="'+w.walletId+'">'+w.walletId+(paused?' (paused - ready to host lanes)':' (RUNNING - pause it first)')+'</option>';
+    }).join('');
+  }catch(e){sel.innerHTML='<option value="">- could not list wallets -</option>'}
 }
 $('#cw-mode').addEventListener('change',cwToggleCreds);
 cwToggleCreds();
@@ -4058,6 +4077,11 @@ $('#cw-submit').addEventListener('click',async()=>{
     const s=$('#cw-apisecret').value.trim();
     if(k)body.apiKey=k;
     if(s)body.apiSecret=s;
+  }
+  if(body.mode==='LIVE_LANE'){
+    const parent=$('#cw-parent').value;
+    if(!parent){showMsg('cw-msg','err','Pick the LIVE account wallet this lane runs on');return}
+    body.parentWalletId=parent;
   }
   const num=f=>{const v=$('#'+f).value.trim();if(!v)return undefined;const n=Number(v.replace(/[$,\s]/g,''));return Number.isFinite(n)?n:undefined};
   const mp=num('cw-maxpos');if(mp!==undefined&&mp>0)body.maxPositionSize=mp;
