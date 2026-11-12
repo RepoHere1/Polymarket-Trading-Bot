@@ -112,6 +112,80 @@ describe('dashboard summary — running wallets and LIVE capital truth', () => {
     );
     // 250.5 (exchange truth for the LIVE wallet) + 1000 (paper capital)
     expect(payload.totalCapital).toBeCloseTo(1250.5, 4);
+    // that LIVE wallet has NOT synced → real money is unknown, never the config number
+    expect(payload.liveCapital).toBeNull();
+    expect(payload.paperCapital).toBeCloseTo(1000, 4);
+  });
+
+  it('liveCapital stays null (not a guess) while the exchange rejects the key', () => {
+    const payload = buildDashboardPayload(
+      [
+        state({
+          walletId: 'live1',
+          mode: 'LIVE',
+          capitalAllocated: 100,
+          availableBalance: 0,
+          realizedPnl: 0,
+          exchangeSynced: false,
+          exchangeError: 'Invalid API key signature',
+        }),
+        state({ walletId: 'paper1', capitalAllocated: 1000, availableBalance: 900, realizedPnl: -2.5 }),
+      ],
+      new Map([['live1', []], ['paper1', []]]),
+    );
+    expect(payload.liveCapital).toBeNull(); // the old lie: header summed config capital as money
+    expect(payload.paperCapital).toBeCloseTo(1000, 4);
+    expect(payload.paperRealizedPnl).toBeCloseTo(-2.5, 4);
+    expect(payload.paperUnrealizedPnl).toBeCloseTo(0, 4);
+    expect(payload.liveRealizedPnl).toBeCloseTo(0, 4);
+    expect(payload.liveUnrealizedPnl).toBeCloseTo(0, 4);
+  });
+
+  it('liveCapital sums exchangeUsd once the exchange answers', () => {
+    const payload = buildDashboardPayload(
+      [
+        state({
+          walletId: 'live1',
+          mode: 'LIVE',
+          capitalAllocated: 100,
+          availableBalance: 240,
+          exchangeSynced: true,
+          exchangeUsd: 250.5,
+        }),
+        state({ walletId: 'paper1', capitalAllocated: 1000 }),
+      ],
+      new Map([['live1', []], ['paper1', []]]),
+    );
+    expect(payload.liveCapital).toBeCloseTo(250.5, 4);
+    expect(payload.paperCapital).toBeCloseTo(1000, 4);
+  });
+
+  it('with no LIVE wallets liveCapital is a real $0 (not "syncing")', () => {
+    const payload = buildDashboardPayload([state()], new Map([['w1', []]]));
+    expect(payload.liveCapital).toBeCloseTo(0, 4);
+  });
+});
+
+describe('wallet detail risk utilization is exchange-truth for LIVE', () => {
+  it('unsynced LIVE: capital utilization is null — never a fake 100%', () => {
+    const d = buildWalletDetail(
+      state({ mode: 'LIVE', capitalAllocated: 100, availableBalance: 0, exchangeSynced: false }),
+      [],
+    );
+    expect(d.risk.capitalUtilization).toBeNull();
+  });
+
+  it('synced LIVE: utilization is computed against exchangeUsd, not config capital', () => {
+    const d = buildWalletDetail(
+      state({ mode: 'LIVE', capitalAllocated: 100, availableBalance: 150, exchangeSynced: true, exchangeUsd: 200 }),
+      [],
+    );
+    expect(d.risk.capitalUtilization).toBeCloseTo(0.25, 4); // 50 of 200 exchange USD committed
+  });
+
+  it('PAPER keeps budget semantics (capitalAllocated basis)', () => {
+    const d = buildWalletDetail(state(), []); // 50 allocated, 30 available
+    expect(d.risk.capitalUtilization).toBeCloseTo(0.4, 4);
   });
 });
 

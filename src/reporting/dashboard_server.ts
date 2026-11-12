@@ -181,9 +181,23 @@ export function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], ma
     hourlyDist[new Date(t.timestamp).getHours()]++;
   }
 
-  /* ── Risk utilization ── */
-  const capitalUsed = wallet.capitalAllocated - wallet.availableBalance;
-  const capitalUtilization = wallet.capitalAllocated > 0 ? capitalUsed / wallet.capitalAllocated : 0;
+  /* ── Risk utilization ──
+     LIVE: only the exchange's own numbers count. Until the exchange answers
+     (exchangeSynced) utilization is UNKNOWN (null) — a 0 balance must never
+     render as "100% capital used". PAPER / LIVE_LANE keep budget semantics. */
+  const liveAccount = wallet.mode === 'LIVE';
+  const capBase = liveAccount
+    ? wallet.exchangeSynced
+      ? wallet.exchangeUsd ?? wallet.availableBalance
+      : null
+    : wallet.capitalAllocated;
+  const capitalUsed = capBase === null ? null : capBase - wallet.availableBalance;
+  const capitalUtilization: number | null =
+    capBase !== null && capBase > 0 && capitalUsed !== null
+      ? Math.max(0, capitalUsed) / capBase
+      : capBase === null
+        ? null
+        : 0;
   const dailyLossUsed = Math.abs(Math.min(0, wallet.realizedPnl));
   const dailyLossUtilization = wallet.riskLimits.maxDailyLoss > 0 ? dailyLossUsed / wallet.riskLimits.maxDailyLoss : 0;
   const openTradeUtilization = wallet.riskLimits.maxOpenTrades > 0 ? wallet.openPositions.length / wallet.riskLimits.maxOpenTrades : 0;
@@ -241,7 +255,7 @@ export function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], ma
       }, 0)) / Math.max(1, wallet.capitalAllocated)),
     },
     risk: {
-      capitalUtilization: round4(capitalUtilization),
+      capitalUtilization: capitalUtilization === null ? null : round4(capitalUtilization),
       dailyLossUtilization: round4(dailyLossUtilization),
       openTradeUtilization: round4(openTradeUtilization),
     },
@@ -2977,23 +2991,35 @@ function barCls(r){return r<.6?'bar-ok':r<.85?'bar-warn':'bar-danger'}
 
 /* ─── Dashboard Tab ─── */
 function renderSummary(d){
-  const rPnl = d.totalRealizedPnl || d.totalPnl || 0;
-  const uPnl = d.totalUnrealizedPnl || 0;
-  const tPnl = d.totalPnl || 0;
+  /* Real money and simulation are NEVER blended into one number. LIVE capital
+     shows "syncing…" (title = the exchange's own error) until the exchange
+     answers; paper totals are labeled as simulated. */
+  const liveErr=(d.wallets||[]).filter(w=>w.mode==='LIVE'&&w.exchangeError).map(w=>w.exchangeError).join('; ').replace(/"/g,'&quot;');
+  const capTitle=liveErr?('polymarket.us error: '+liveErr):'Real USD reported by polymarket.us';
+  const liveCap=(d.liveCapital===null||d.liveCapital===undefined)
+    ?'<span style="color:var(--muted)" title="'+capTitle+'">syncing…</span>'
+    :'$'+fmt(d.liveCapital,0);
+  const liveR=d.liveRealizedPnl||0, liveU=d.liveUnrealizedPnl||0, liveT=liveR+liveU;
+  const pR=d.paperRealizedPnl||0, pU=d.paperUnrealizedPnl||0, pT=pR+pU;
   $('#summary').innerHTML=
     '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+' <span style="font-size:12px;opacity:.65">of '+(d.totalWallets ?? d.activeWallets)+'</span></div></div>'+
-    '<div class="s-card"><div class="label">Total Capital</div><div class="value">$'+fmt(d.totalCapital,0)+'</div></div>'+
-    '<div class="s-card"><div class="label">Realized PnL</div><div class="value '+pnlCls(rPnl)+'">$'+fmt(rPnl)+'</div></div>'+
-    '<div class="s-card"><div class="label">Unrealized PnL</div><div class="value '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
-    '<div class="s-card"><div class="label">Total PnL</div><div class="value '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
+    '<div class="s-card"><div class="label">Real Capital (LIVE)</div><div class="value" title="'+capTitle+'">'+liveCap+'</div><div style="font-size:11px;opacity:.6">Paper (simulated): $'+fmt(d.paperCapital||0,0)+'</div></div>'+
+    '<div class="s-card"><div class="label">Realized PnL (real)</div><div class="value '+pnlCls(liveR)+'">$'+fmt(liveR)+'</div><div style="font-size:11px;opacity:.6">Paper: $'+fmt(pR)+'</div></div>'+
+    '<div class="s-card"><div class="label">Unrealized PnL (real)</div><div class="value '+pnlCls(liveU)+'">$'+fmt(liveU)+'</div><div style="font-size:11px;opacity:.6">Paper: $'+fmt(pU)+'</div></div>'+
+    '<div class="s-card"><div class="label">Total PnL (real)</div><div class="value '+pnlCls(liveT)+'">$'+fmt(liveT)+'</div><div style="font-size:11px;opacity:.6">Paper: $'+fmt(pT)+'</div></div>'+
     '<div class="s-card"><div class="label">Engine Status</div><div class="value" style="font-size:16px;color:var(--green)">RUNNING</div></div>';
 }
 
 function renderWallets(wl){
   $('#wallets').innerHTML=wl.map(w=>{
     const p=w.performance;
-    const capUsed=w.capitalAllocated-w.availableBalance;
-    const capR=Math.min(1,capUsed/Math.max(1,w.capitalAllocated));
+    /* LIVE utilization is exchange truth only: null (—) until the exchange
+       answers. Config capital minus a 0 balance must never show "100% used". */
+    const capR = w.mode==='LIVE'
+      ? (w.exchangeSynced
+          ? Math.min(1,Math.max(0,(w.exchangeUsd ?? w.availableBalance)-w.availableBalance)/Math.max(0.01,w.exchangeUsd ?? w.availableBalance))
+          : null)
+      : Math.min(1,(w.capitalAllocated-w.availableBalance)/Math.max(1,w.capitalAllocated));
     const lossR=Math.min(1,Math.abs(Math.min(0,w.realizedPnl))/w.riskLimits.maxDailyLoss);
     const trR=Math.min(1,w.openPositions.length/w.riskLimits.maxOpenTrades);
     const uPnl = w.unrealizedPnl || 0;
@@ -3036,7 +3062,9 @@ function renderWallets(wl){
       '<div class="m-cell"><div class="m-label">Trades</div><div class="m-val">'+p.totalTrades+' <span style="font-size:10px;color:var(--muted)">('+p.closedTrades+' closed: '+p.winCount+'W/'+p.lossCount+'L)</span></div></div>'+
       '<div class="m-cell"><div class="m-label">Profit Factor</div><div class="m-val">'+(p.closedTrades>0?(p.profitFactor>=999?'\u221E':fmt(p.profitFactor,1)):'\u2014')+'</div></div></div>'+
       '<div class="risk-sec"><div class="r-title">Risk Utilization</div><div class="risk-bars">'+
-      '<div class="rb-row"><span class="rb-label">Capital Used</span><div class="rb-track"><div class="rb-fill '+barCls(capR)+'" style="width:'+(capR*100).toFixed(1)+'%"></div></div><span class="rb-val">'+pct(capR)+'</span></div>'+
+      (capR===null
+        ? '<div class="rb-row"><span class="rb-label">Capital Used</span><div class="rb-track"><div class="rb-fill" style="width:0%"></div></div><span class="rb-val" title="'+String(w.exchangeError||'waiting for the exchange to answer').replace(/"/g,'&quot;')+'">—</span></div>'
+        : '<div class="rb-row"><span class="rb-label">Capital Used</span><div class="rb-track"><div class="rb-fill '+barCls(capR)+'" style="width:'+(capR*100).toFixed(1)+'%"></div></div><span class="rb-val">'+pct(capR)+'</span></div>')+
       '<div class="rb-row"><span class="rb-label">Daily Loss</span><div class="rb-track"><div class="rb-fill '+barCls(lossR)+'" style="width:'+(lossR*100).toFixed(1)+'%"></div></div><span class="rb-val">'+pct(lossR)+'</span></div>'+
       '<div class="rb-row"><span class="rb-label">Open Trades</span><div class="rb-track"><div class="rb-fill '+barCls(trR)+'" style="width:'+(trR*100).toFixed(1)+'%"></div></div><span class="rb-val">'+w.openPositions.length+'/'+w.riskLimits.maxOpenTrades+'</span></div>'+
       '</div></div>'+
@@ -3175,6 +3203,10 @@ function renderWalletDetail(d){
     ['Open Trade Slots',r.openTradeUtilization],
   ];
   for(const[label,val] of risks){
+    if(val===null||val===undefined){
+      html+='<div class="wd-rb"><span class="lbl">'+label+'</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="val" title="Waiting for the exchange — no number until it answers">—</span></div>';
+      continue;
+    }
     const cls=val<0.6?'bar-ok':val<0.85?'bar-warn':'bar-danger';
     html+='<div class="wd-rb"><span class="lbl">'+label+'</span><div class="track"><div class="fill '+cls+'" style="width:'+(val*100).toFixed(1)+'%"></div></div><span class="val">'+pct(val)+'</span></div>';
   }

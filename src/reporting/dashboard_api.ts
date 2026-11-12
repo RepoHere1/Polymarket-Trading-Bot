@@ -58,6 +58,17 @@ export interface DashboardPayload {
   totalPnl: number;
   totalRealizedPnl: number;
   totalUnrealizedPnl: number;
+  /** Real money: exchange-reported USD across synced LIVE wallets. null when a
+      LIVE wallet exists but none has ever synced — real money is never guessed. */
+  liveCapital: number | null;
+  /** Simulated capital (PAPER wallets only). Not money. */
+  paperCapital: number;
+  /** PnL from LIVE / LIVE_LANE wallets only (real fills on the exchange). */
+  liveRealizedPnl: number;
+  liveUnrealizedPnl: number;
+  /** PnL from PAPER wallets only (simulation). */
+  paperRealizedPnl: number;
+  paperUnrealizedPnl: number;
   /** Wallets whose strategy runner is attached AND not paused (the "X of Y" in the header). */
   activeWallets: number;
   /** All wallets known to the manager (running, paused, or runner-less). */
@@ -184,9 +195,40 @@ export function buildDashboardPayload(
     0,
   );
 
+  /* ── Real vs simulated split (the header must never blend them) ──
+     Real money is ONLY what the exchange answered with (synced LIVE
+     wallets' exchangeUsd). An unsynced LIVE wallet contributes nothing —
+     its config capital is a label, never money. Paper capital and paper
+     PnL are simulation, shown separately. */
+  const isRealMode = (e: WalletDashboardEntry) => e.mode === 'LIVE' || e.mode === 'LIVE_LANE';
+  const liveEntries = entries.filter(isRealMode);
+  const paperEntries = entries.filter((e) => !isRealMode(e));
+  const syncedLive = entries.filter((e) => e.mode === 'LIVE' && e.exchangeSynced);
+  const liveCapital: number | null =
+    liveEntries.length === 0
+      ? 0 // no LIVE wallets at all → real money is $0, not "syncing"
+      : syncedLive.length > 0
+        ? Number(
+            syncedLive.reduce((s, e) => s + (e.exchangeUsd ?? e.availableBalance), 0).toFixed(4),
+          )
+        : null; // LIVE exists, exchange never answered → unknown, never faked
+  const paperCapital = Number(paperEntries.reduce((s, e) => s + e.capitalAllocated, 0).toFixed(4));
+  const liveRealizedPnl = Number(liveEntries.reduce((s, e) => s + e.realizedPnl, 0).toFixed(4));
+  const liveUnrealizedPnl = Number(liveEntries.reduce((s, e) => s + e.unrealizedPnl, 0).toFixed(4));
+  const paperRealizedPnl = Number(paperEntries.reduce((s, e) => s + e.realizedPnl, 0).toFixed(4));
+  const paperUnrealizedPnl = Number(
+    paperEntries.reduce((s, e) => s + e.unrealizedPnl, 0).toFixed(4),
+  );
+
   return {
     generatedAt: new Date().toISOString(),
     totalCapital,
+    liveCapital,
+    paperCapital,
+    liveRealizedPnl,
+    liveUnrealizedPnl,
+    paperRealizedPnl,
+    paperUnrealizedPnl,
     totalPnl: Number((totalRealizedPnl + totalUnrealizedPnl).toFixed(4)),
     totalRealizedPnl: Number(totalRealizedPnl.toFixed(4)),
     totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
