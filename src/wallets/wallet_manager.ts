@@ -138,18 +138,29 @@ export class WalletManager {
       throw new Error(`Wallet ${config.id} already registered`);
     }
 
+    /* ONE LIVE: config LIVE wallets register on EVERY boot. When the server
+       is not armed the wallet still wires (balance reads, previews) - real
+       orders are gated inside placeOrder, not here. */
     if (config.mode !== 'PAPER' && !enableLive) {
-      logger.warn(
+      logger.info(
         { walletId: config.id },
-        'LIVE trading requested but ENABLE_LIVE_TRADING is false; refusing LIVE wallet',
+        'LIVE wallet registered in PREVIEW mode (ENABLE_LIVE_TRADING is not "true": orders stay preview-only until the server is armed)',
+      );
+    }
+
+    let wallet: ExecutionWallet;
+    try {
+      wallet =
+        config.mode !== 'PAPER'
+          ? this.createLiveWallet(config, assignedStrategy)
+          : new PaperWallet(config, assignedStrategy, () => this.marketData());
+    } catch (err) {
+      logger.error(
+        { walletId: config.id, err: err instanceof Error ? err.message : String(err) },
+        `LIVE wallet ${config.id} could not be wired; skipped`,
       );
       return;
     }
-
-    const wallet =
-      config.mode !== 'PAPER'
-        ? this.createLiveWallet(config, assignedStrategy)
-        : new PaperWallet(config, assignedStrategy, () => this.marketData());
 
     this.wallets.set(config.id, wallet);
     const state = wallet.getState();

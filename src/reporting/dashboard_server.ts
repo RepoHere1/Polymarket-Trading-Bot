@@ -895,13 +895,12 @@ export class DashboardServer {
 
   /** Re-wire a persisted env-credential LIVE wallet (armed servers only). */
   private restoreLiveWalletRow(p: PersistedPaperWallet): void {
-    const armed = process.env.ENABLE_LIVE_TRADING === 'true';
     const envKey = process.env.POLYMARKET_API_KEY ?? '';
     const envSecret = process.env.POLYMARKET_API_SECRET ?? '';
-    if (!armed || !envKey || !envSecret) {
+    if (!envKey || !envSecret) {
       logger.warn(
-        { walletId: p.walletId, armed, hasEnvCreds: Boolean(envKey && envSecret) },
-        `LIVE wallet "${p.walletId}" NOT restored (row kept) - server is not armed or .env polyUSA credentials are missing. Restart armed (.\\start_bot.ps1 -Live) to bring it back.`,
+        { walletId: p.walletId, hasEnvCreds: false },
+        `LIVE wallet "${p.walletId}" NOT restored (row kept) - .env polyUSA credentials are missing. Orders are preview-only until the server is armed anyway.`,
       );
       return;
     }
@@ -1209,14 +1208,11 @@ export class DashboardServer {
         }
       }
 
-      if ((mode === 'LIVE' || mode === 'LIVE_LANE') && process.env.ENABLE_LIVE_TRADING !== 'true') {
-        json(res, 403, {
-          ok: false,
-          error:
-            'LIVE trading is not armed on this server. Restart with .\\start_bot.ps1 -Live (or set ENABLE_LIVE_TRADING=true in .env). When armed, LIVE wallets still default to preview-only dry run until POLYMARKET_DRY_RUN=false.',
-        });
-        return;
-      }
+      /* ONE LIVE MODE, INSTANT WIRING: creating a LIVE wallet is always
+         allowed - no arming requirement at creation. Real orders remain
+         independently gated inside PolymarketWallet.placeOrder
+         (ENABLE_LIVE_TRADING === 'true' AND POLYMARKET_DRY_RUN === 'false');
+         everything else is preview-only dry run. */
 
       const existing = this.walletManager.listWallets().find((w) => w.walletId === walletId);
       if (existing) {
@@ -1413,7 +1409,7 @@ export class DashboardServer {
           ? `LIVE wallet "${walletId}" created (${strategy}, $${capital}). Fund it with USDC on polymarket.us — balance is read from the exchange. Credentials: ${
               importedCreds
                 ? 'imported (in-memory only - after a restart you must recreate the wallet; credentials are never written to disk)'
-                : 'environment (.env) - the wallet RECORD is persisted without secrets and is restored automatically whenever the server restarts armed (start_bot.ps1 -Live)'
+                : 'environment (.env) - the wallet RECORD is persisted without secrets and is restored automatically on every restart'
             }. Orders stay preview-only until POLYMARKET_DRY_RUN=false.`
           : `Wallet "${walletId}" created (PAPER, ${strategy}, $${capital})`;
       json(res, 201, { ok: true, message });
@@ -2343,7 +2339,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <div class="form-grid">
       <div class="fg"><label>Wallet ID</label><input id="cw-id" placeholder="e.g. wallet_4"></div>
       <div class="fg"><label>Mode</label>
-        <select id="cw-mode"><option value="PAPER">PAPER (live book, no real orders)</option><option value="LIVE">LIVE (real money — preview dry-run by default)</option><option value="LIVE_LANE">LIVE Lane (budget slice of a paused LIVE account)</option></select>
+        <select id="cw-mode"><option value="PAPER">PAPER (live book, no real orders)</option><option value="LIVE">LIVE (your polymarket.us account - wired immediately)</option></select>
       </div>
       <div class="fg"><label>Strategy</label><select id="cw-strategy"></select></div>
       <div class="fg"><label>Capital ($)</label><input id="cw-capital" type="number" min="1" value="500" placeholder="500"></div>
@@ -2354,9 +2350,8 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
       <div class="fg" id="cw-whales-row" style="display:none;grid-column:1 / -1"><label>🐋 Whale Wallet Addresses (this wallet will copy-trade them)</label><textarea id="cw-whales" rows="2" placeholder="0x… 0x… — real Polymarket proxy wallet ADDRESSES (not usernames). Separate with commas, spaces, or new lines. Leave empty to follow the Whale Tracker's promoted whales automatically." spellcheck="false"></textarea></div>
       <div class="fg" id="cw-cred-key" style="display:none"><label>PolyUSA API Key</label><input id="cw-apikey" placeholder="blank = server .env keys" autocomplete="off" spellcheck="false"></div>
       <div class="fg" id="cw-cred-secret" style="display:none"><label>PolyUSA API Secret</label><input id="cw-apisecret" type="password" placeholder="blank = server .env keys" autocomplete="off"></div>
-      <div class="fg" id="cw-cred-parent" style="display:none"><label>Parent LIVE Account</label><select id="cw-parent"><option value="">— no LIVE wallets —</option></select></div>
     </div>
-    <div id="cw-live-note" class="form-msg" style="display:none;text-align:left">LIVE wallets trade your polymarket.us account: fund with USDC there (balance is read from the exchange). polyUSA signs orders with API keys — seed phrases / private keys are not used, so "importing a wallet" = pasting that account's API key + secret below (create keys in your polymarket.us account under Developer/API settings). Leave both blank to use the server's .env credentials. ONE LIVE wallet per polymarket.us account — two wallets sharing an account would each spend its full balance. For several strategies on ONE account: pause the LIVE wallet, pick "LIVE Lane" mode, and add a lane per strategy — each lane trades with its own budget and risk limits and can never spend past its budget (the sum of lane budgets is checked against the account's real buying power). Orders stay preview-only until POLYMARKET_DRY_RUN=false.</div>
+    <div id="cw-live-note" class="form-msg" style="display:none;text-align:left">LIVE wallets trade your polymarket.us account: fund with USDC there (balance is read from the exchange). polyUSA signs orders with API keys — seed phrases / private keys are not used, so "importing a wallet" = pasting that account's API key + secret below (create keys in your polymarket.us account under Developer/API settings). Leave both blank to use the server's .env credentials. ONE LIVE wallet per polymarket.us account — two wallets sharing an account would each spend its full balance. Orders stay preview-only until POLYMARKET_DRY_RUN=false.</div>
     <div class="form-actions">
       <button class="btn btn-primary" id="cw-submit">Create Wallet</button>
       <div class="form-msg" id="cw-msg"></div>
@@ -3990,28 +3985,10 @@ function cwToggleWhales(){
 }
 
 function cwToggleCreds(){
-  const m=$('#cw-mode').value;
-  const live=m==='LIVE',lane=m==='LIVE_LANE';
+  const live=$('#cw-mode').value==='LIVE';
   $('#cw-cred-key').style.display=live?'':'none';
   $('#cw-cred-secret').style.display=live?'':'none';
-  $('#cw-cred-parent').style.display=lane?'':'none';
-  $('#cw-live-note').style.display=(live||lane)?'':'none';
-  if(lane)cwLoadParents();
-}
-async function cwLoadParents(){
-  try{
-    const r=await fetch('/api/wallets');
-    const ws=await r.json()||[];
-    const parents=ws.filter(w=>w.mode==='LIVE');
-    const sig=JSON.stringify(parents.map(w=>w.walletId));
-    const sel=$('#cw-parent');
-    if(sel.dataset.sig!==sig){
-      sel.dataset.sig=sig;
-      sel.innerHTML=parents.length
-        ?parents.map(w=>'<option value="'+w.walletId+'">'+w.walletId+'</option>').join('')
-        :'<option value="">— create & pause a LIVE wallet first —</option>';
-    }
-  }catch(e){console.error(e)}
+  $('#cw-live-note').style.display=live?'':'none';
 }
 $('#cw-mode').addEventListener('change',cwToggleCreds);
 cwToggleCreds();
@@ -4036,11 +4013,6 @@ $('#cw-submit').addEventListener('click',async()=>{
     const s=$('#cw-apisecret').value.trim();
     if(k)body.apiKey=k;
     if(s)body.apiSecret=s;
-  }
-  if(body.mode==='LIVE_LANE'){
-    const p=$('#cw-parent').value;
-    if(!p){showMsg('cw-msg','err','Create & pause a LIVE account wallet first');return}
-    body.parentWalletId=p;
   }
   const num=f=>{const v=$('#'+f).value.trim();if(!v)return undefined;const n=Number(v.replace(/[$,\s]/g,''));return Number.isFinite(n)?n:undefined};
   const mp=num('cw-maxpos');if(mp!==undefined&&mp>0)body.maxPositionSize=mp;
