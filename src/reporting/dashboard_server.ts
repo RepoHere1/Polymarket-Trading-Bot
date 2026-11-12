@@ -1782,6 +1782,8 @@ export class DashboardServer {
         mode: string;
         paused: boolean;
         links: Array<{ address: string; enabled: boolean }>;
+        copied: number;
+        openCopies: number;
       }> = [];
       for (const state of this.walletManager.listWallets()) {
         if (state.assignedStrategy !== 'copy_trade') continue;
@@ -1804,12 +1806,15 @@ export class DashboardServer {
           seen.add(addr);
           links.push({ address: addr, enabled: false });
         }
+        const cs = inst instanceof CopyTradeStrategy ? inst.getStats() : null;
         lanes.push({
           walletId: state.walletId,
           displayName: this.walletDisplayNames.get(state.walletId) ?? state.walletId,
           mode: state.mode,
           paused: this.engine?.getPausedWallets().has(state.walletId) ?? false,
           links,
+          copied: cs?.totalCopied ?? 0,
+          openCopies: cs?.openPositions ?? 0,
         });
       }
       json(res, 200, { ok: true, lanes });
@@ -1849,6 +1854,56 @@ export class DashboardServer {
         enabled: enable,
         following: inst.getWhaleAddresses().length,
       });
+      return;
+    }
+
+    /* ─── JSON: per-lane copy link ADD (operator wires ONE whale to ONE lane) ─── */
+    if (path === '/api/copy-links/add' && method === 'POST') {
+      const body = await readBody(req);
+      const walletId = ((body.walletId as string) || '').trim();
+      const address = ((body.address as string) || '').toLowerCase().trim();
+      if (!walletId || !/^0x[0-9a-f]{40}$/.test(address)) {
+        json(res, 400, { ok: false, error: 'Need "walletId" and a valid 0x… whale address' });
+        return;
+      }
+      const inst = this.engine?.getRunnerStrategy(walletId);
+      if (!(inst instanceof CopyTradeStrategy)) {
+        json(res, 404, { ok: false, error: `Wallet "${walletId}" is not a running copy_trade lane` });
+        return;
+      }
+      /* An explicit operator ADD clears any stale OFF first — the button push
+         is the authority, not an old deny row. */
+      inst.allowWhaleAddress(address);
+      if (!inst.addWhaleAddress(address)) {
+        json(res, 409, { ok: false, error: `Address ${address.slice(0, 10)}… is already followed on this lane` });
+        return;
+      }
+      this.store().setWhaleDenied(walletId, address, false);
+      json(res, 200, { ok: true, walletId, address, following: inst.getWhaleAddresses().length });
+      return;
+    }
+
+    /* ─── JSON: per-lane copy link REMOVE (operator unwires ONE whale from ONE lane) ───
+       This is NOT a block: the 60s tracker bridge may re-add a tracked whale —
+       the OFF toggle is the permanent block. Remove also clears the OFF row so
+       the whale vanishes from the lane's link list entirely. */
+    if (path === '/api/copy-links/remove' && method === 'POST') {
+      const body = await readBody(req);
+      const walletId = ((body.walletId as string) || '').trim();
+      const address = ((body.address as string) || '').toLowerCase().trim();
+      if (!walletId || !/^0x[0-9a-f]{40}$/.test(address)) {
+        json(res, 400, { ok: false, error: 'Need "walletId" and a valid 0x… whale address' });
+        return;
+      }
+      const inst = this.engine?.getRunnerStrategy(walletId);
+      if (!(inst instanceof CopyTradeStrategy)) {
+        json(res, 404, { ok: false, error: `Wallet "${walletId}" is not a running copy_trade lane` });
+        return;
+      }
+      inst.allowWhaleAddress(address);
+      inst.removeWhaleAddress(address);
+      this.store().setWhaleDenied(walletId, address, false);
+      json(res, 200, { ok: true, walletId, address, following: inst.getWhaleAddresses().length });
       return;
     }
 
@@ -2158,6 +2213,13 @@ td{font-size:12px;padding:5px 0;border-bottom:1px solid var(--border)}.o-YES{col
 .wallet-table tbody tr{cursor:pointer;transition:background .15s}
 .wallet-table tbody tr:hover td{background:rgba(79,143,247,.08)}
 
+/* ═══ Copy Trading Tab ═══ */
+.ct-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:14px}
+.ct-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;display:flex;flex-direction:column;gap:10px}
+.ct-card.live{border-color:rgba(255,77,106,.45);box-shadow:inset 3px 0 0 var(--red)}
+.ct-card.paper{border-color:var(--border);box-shadow:inset 3px 0 0 var(--blue)}
+.ct-sub{font-size:11px;color:var(--muted);line-height:1.5}
+
 /* ═══ Strategies Tab ═══ */
 .strat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:18px}
 .strat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;transition:border-color .2s}
@@ -2449,7 +2511,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <button class="tab-btn" data-tab="strategies">Strategies</button>
     <button class="tab-btn" data-tab="analytics">Analytics</button>
     <button class="tab-btn" data-tab="whales">🐋 Whales</button>
-    <button class="tab-btn" data-tab="copylinks">🔗 Copy Links</button>
+    <button class="tab-btn" data-tab="copytrade">🤖 Copy Trading</button>
     <button class="tab-btn" data-tab="console">📟 Console</button>
   </div>
   <div class="header-right">
@@ -2962,11 +3024,25 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
   </div>
 </div>
 
-<!-- ═══════════ COPY LINKS TAB ═══════════ -->
-<div class="tab-pane" id="pane-copylinks">
-  <div class="section-title"><span class="icon">🔗</span> Copy Links — whale switches per lane (live + paper)</div>
-  <p style="color:var(--accent);font-size:12px;margin:0 0 14px;max-width:900px">Every whale each COPY TRADE lane follows, with an ON/OFF switch per link. OFF stops copying that whale immediately, survives restarts, and the whale-tracker bridge cannot re-enable it behind your back. PAPER lanes fake-copy; LIVE lanes preview real copy orders (dry-run until POLYMARKET_DRY_RUN=false). Newly promoted whales from the 🐋 Whale Tracker appear here automatically.</p>
-  <div id="cl-lanes"></div>
+<!-- ═══════════ COPY TRADING TAB ═══════════ -->
+<div class="tab-pane" id="pane-copytrade">
+  <div class="section-title"><span class="icon">🤖</span> Copy Trading — every copy lane, LIVE split from DRY, whales wired per lane</div>
+  <p style="color:var(--accent);font-size:12px;margin:0 0 12px;max-width:980px">One card per COPY TRADE lane. <strong style="color:var(--red)">REAL MONEY</strong> lanes spend only their allotment of your single polymarket.us account; <strong style="color:var(--blue)">DRY RUN</strong> lanes are paper simulation — they never touch real money. Each card lists the whales it copies: switch a link <strong>OFF</strong> to stop copying that whale permanently (survives restarts, the tracker cannot re-enable it), or <strong>&#10005;</strong> to unwire it (a tracked whale can come back on its own). Orders stay preview-only until the bot is armed for live trading.</p>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 16px">
+    <input id="ct-add-all" placeholder="0x… whale address" style="font-family:monospace;width:340px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px">
+    <button class="btn" onclick="addWhaleAllLanes()">+ Add whale to ALL lanes</button>
+    <span id="ct-tracked" style="font-size:11px;color:var(--muted)"></span>
+  </div>
+  <div id="ct-live-wrap" style="margin-bottom:22px">
+    <div class="section-title" style="font-size:14px"><span class="icon">🔴</span> REAL MONEY — LIVE COPY LANES <span style="font-size:11px;color:var(--muted);font-weight:400">(orders settle on polymarket.us; preview-only while disarmed)</span></div>
+    <div class="ct-grid" id="ct-live"></div>
+  </div>
+  <div id="ct-paper-wrap" style="margin-bottom:22px">
+    <div class="section-title" style="font-size:14px"><span class="icon">🔵</span> DRY RUN — PAPER COPY LANES <span style="font-size:11px;color:var(--muted);font-weight:400">(simulated fills, no real money)</span></div>
+    <div class="ct-grid" id="ct-paper"></div>
+  </div>
+  <div class="section-title" style="font-size:14px"><span class="icon">📋</span> Copy Activity — latest fills across every copy lane</div>
+  <div id="ct-activity"></div>
 </div>
 
 <!-- ═══════════ CONSOLE TAB ═══════════ -->
@@ -3106,7 +3182,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.getElementById('pane-' + btn.dataset.tab).classList.add('active');
     if(btn.dataset.tab==='markets') loadMarkets();
     if(btn.dataset.tab==='whales') loadWhales();
-    if(btn.dataset.tab==='copylinks') loadCopyLinks();
+    if(btn.dataset.tab==='copytrade') loadCopyTrade();
   });
 });
 
@@ -4436,57 +4512,130 @@ document.querySelectorAll('.wh-sub').forEach(btn=>{
   });
 });
 
-async function loadCopyLinks(){
+async function ctWalletMap(){
+  if(!currentData){ try{ const r=await fetch('/api/data'); if(r.ok) currentData=await r.json(); }catch(e){/* fall back to links payload alone */} }
+  const m={};
+  if(currentData&&Array.isArray(currentData.wallets)) for(const w of currentData.wallets) m[w.walletId]=w;
+  return m;
+}
+function ctMoney(w){
+  if(!w) return '<span class="ct-sub">money figures waiting for first dashboard sync\u2026</span>';
+  if(w.mode==='LIVE_LANE') return '<span style="color:#ff9f43;font-weight:700">$'+fmt(w.capitalAllocated,0)+' LIVE ALLOTTED to this lane</span> &middot; $'+fmt(w.availableBalance,0)+' cash left';
+  if(w.mode==='LIVE') return usdOrSync(w,w.capitalAllocated,0)+' LIVE ACCOUNT USD &middot; '+usdOrSync(w,w.availableBalance,0)+' spendable';
+  return '$'+fmt(w.capitalAllocated,0)+' paper capital &middot; $'+fmt(w.availableBalance,0)+' cash left';
+}
+function ctProvBadge(w){
+  const isPoly=w&&Array.isArray(w.tags)&&w.tags.indexOf('polywhaler')!==-1;
+  return isPoly?'<span class="badge" style="background:rgba(0,214,143,.12);color:var(--green)">polywhaler</span>':(w?'<span class="badge badge-PAPER">tracker</span>':'<span class="badge badge-PAPER">manual</span>');
+}
+
+function ctWhaleRow(walletId,l,wmap){
+  const w=wmap[l.address];
+  const name=w&&w.displayName?('<strong>'+w.displayName+'</strong> '):'';
+  const stats=w?('WR '+Math.round((w.winRate||0)*100)+'% &middot; 30d PnL $'+Number(w.realizedPnl30d||0).toFixed(0)+' &middot; 30d Vol $'+Math.round(w.totalVolume30d||0)):'';
+  return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">'+
+    '<div style="flex:1;min-width:0">'+name+ctProvBadge(w)+'<br><span style="font-family:monospace;word-break:break-all">'+l.address+'</span>'+(stats?'<br><span style="color:var(--accent)">'+stats+'</span>':'')+'</div>'+
+    '<button class="toggle-btn '+(l.enabled?'running':'paused')+'" onclick="toggleCopyLink(\\''+walletId+'\\',\\''+l.address+'\\','+l.enabled+')" title="'+(l.enabled?'OFF: stop copying this whale on this lane — permanent, survives restarts':'ON: resume copying this whale')+'"><span class="toggle-dot"></span>'+(l.enabled?'ON':'OFF')+'</button>'+
+    '<button class="btn btn-danger btn-sm" onclick="removeCopyLink(\\''+walletId+'\\',\\''+l.address+'\\')" title="Unwire this whale from this lane (a tracked whale can come back — use OFF to block permanently)">&#10005;</button>'+
+    '</div>';
+}
+function ctCard(ln,w,wmap){
+  const p=(w&&w.performance)||{realizedPnl:0,winRate:0,closedTrades:0};
+  const uPnl=(w&&w.unrealizedPnl)||0, tPnl=(w&&w.totalPnl)||p.realizedPnl;
+  const isLive=ln.mode==='LIVE'||ln.mode==='LIVE_LANE';
+  const paused=((w&&w.paused)||ln.paused||false);
+  const on=ln.links.filter(l=>l.enabled).length;
+  return '<div class="ct-card '+(isLive?'live':'paper')+'">'+
+    '<div style="display:flex;align-items:center;gap:8px"><strong style="flex:1;font-size:14px;cursor:pointer" onclick="openWalletDetail(\\''+ln.walletId+'\\')" title="Open full analytics">'+(ln.displayName||ln.walletId)+'</strong>'+
+    '<span class="badge badge-'+ln.mode+'">'+(ln.mode==='LIVE_LANE'?'LIVE LANE':ln.mode)+'</span>'+
+    '<button class="toggle-btn '+(paused?'paused':'running')+'" onclick="ctToggleWallet(\\''+ln.walletId+'\\','+paused+')" title="'+(paused?'Start':'Pause')+' this lane"><span class="toggle-dot"></span>'+(paused?'\u25B6 Start':'\u23F8 Running')+'</button></div>'+
+    '<div style="font-size:12px">'+ctMoney(w)+'</div>'+
+    '<div style="display:flex;gap:14px;font-size:12px;flex-wrap:wrap">'+
+    '<span>Realized <span class="'+pnlCls(p.realizedPnl)+'">$'+fmt(p.realizedPnl)+'</span></span>'+
+    '<span>Unrealized <span class="'+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</span></span>'+
+    '<span>Total <span class="'+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</span></span>'+
+    '<span>WR '+(p.closedTrades>0?pct(p.winRate):'N/A')+'</span>'+
+    '<span title="Whale fills this lane copied">'+(ln.copied||0)+' copied &middot; '+(ln.openCopies||0)+' open</span>'+
+    '</div>'+
+    '<div><div style="font-size:11px;color:var(--muted);margin-bottom:2px">\uD83D\uDC33 Whales copied — <strong>'+on+' ON</strong> of '+ln.links.length+' linked</div>'+
+    (ln.links.length>0
+      ?'<div style="max-height:170px;overflow-y:auto">'+ln.links.map(l=>ctWhaleRow(ln.walletId,l,wmap)).join('')+'</div>'
+      :'<div class="ct-sub">None yet — the \uD83D\uDC33 Whale Tracker promotes whales here automatically, or add one below.</div>')+
+    '<div style="display:flex;gap:6px;margin-top:6px"><input id="ct-add-'+ln.walletId+'" placeholder="0x\u2026 add whale to THIS lane" style="flex:1;font-family:monospace;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px"><button class="btn btn-sm" onclick="addCopyLink(\\''+ln.walletId+'\\')">+ Add</button></div></div>'+
+    '</div>';
+}
+async function loadCopyTrade(){
   try{
-    const r=await fetch('/api/copy-links');
-    if(!r.ok){document.getElementById('cl-lanes').innerHTML='<p class="empty">Copy links unavailable ('+r.status+').</p>';return}
-    const d=await r.json();
-    /* Join the whale tracker (/api/whales) for names, provenance and stats */
-    const wmap={};
-    try{
-      const wr=await fetch('/api/whales');
-      if(wr.ok){
-        const wd=await wr.json();
-        const list=Array.isArray(wd)?wd:(wd.whales||[]);
-        for(const w of list){ if(w&&w.address) wmap[String(w.address).toLowerCase()]=w }
-      }
-    }catch(e){/* tracker unreachable — plain addresses still render */}
-    const trackedCount=Object.keys(wmap).length;
-    const lanes=d.lanes||[];
-    if(lanes.length===0){document.getElementById('cl-lanes').innerHTML='<p class="empty">No copy_trade wallets yet. Create one (Wallets tab, strategy COPY TRADE) to link whales to it.</p>';return}
-    let html='';
-    if(trackedCount>0){html+='<p style="color:var(--accent);font-size:12px;margin:0 0 10px">Whale tracker connection: <strong>'+trackedCount+'</strong> whales tracked (leaderboard-style scores in the 🐋 Whales tab). Rows below show each whale the lane copies, where it came from (polywhaler / tracker / manual) and its live stats.</p>'}
-    for(const ln of lanes){
-      const badge=ln.mode==='LIVE_LANE'?'LIVE LANE':ln.mode;
-      const on=ln.links.filter(l=>l.enabled).length;
-      html+='<div class="wd-section" style="margin-bottom:14px"><h3>'+ln.displayName+' <span class="badge badge-'+ln.mode+'">'+badge+'</span> <span style="font-size:11px;color:var(--accent);font-weight:400">'+(ln.paused?'PAUSED':'RUNNING')+' &middot; '+on+' of '+ln.links.length+' link(s) ON</h3>';
-      if(ln.links.length===0){html+='<p class="empty">No whales linked yet — the whale tracker adds promoted whales here automatically.</p></div>';continue}
-      html+='<table class="wd-mkt-table"><thead><tr><th>Whale</th><th style="width:130px">Copy link</th></tr></thead><tbody>';
-      for(const l of ln.links){
-        const w=wmap[l.address];
-        const name=w&&w.displayName?w.displayName:null;
-        const isPoly=w&&Array.isArray(w.tags)&&w.tags.indexOf('polywhaler')!==-1;
-        const prov=isPoly?'<span class="badge" style="background:rgba(0,214,143,.12);color:var(--green)">polywhaler</span>':(w?'<span class="badge badge-PAPER">tracker</span>':'<span class="badge badge-PAPER">manual</span>');
-        const stats=w?('WR '+Math.round((w.winRate||0)*100)+'% &middot; 30d PnL $'+Number(w.realizedPnl30d||0).toFixed(0)+' &middot; 30d Vol $'+Math.round(w.totalVolume30d||0)):'';
-        html+='<tr><td style="font-size:12px">'+
-          (name?'<strong>'+name+'</strong> ':'')+prov+'<br>'+
-          '<span style="font-family:monospace;word-break:break-all">'+l.address+'</span>'+
-          (stats?'<br><span style="color:var(--accent);font-size:11px">'+stats+'</span>':'')+
-          '</td>'+
-          '<td><button class="toggle-btn '+(l.enabled?'running':'paused')+'" onclick="toggleCopyLink(\\''+ln.walletId+'\\',\\''+l.address+'\\','+l.enabled+')" title="'+(l.enabled?'Turn this copy link OFF (stops copying this whale; survives restarts)':'Turn this copy link back ON')+'"><span class="toggle-dot"></span>'+(l.enabled?'ON':'OFF')+'</button></td></tr>';
-      }
-      html+='</tbody></table></div>';
-    }
-    document.getElementById('cl-lanes').innerHTML=html;
+    const clP=(async()=>{try{const r=await fetch('/api/copy-links');return r.ok?await r.json():null}catch(e){return null}})();
+    const wmapP=(async()=>{const m={};try{const wr=await fetch('/api/whales');if(wr.ok){const wd=await wr.json();const list=Array.isArray(wd)?wd:(wd.whales||[]);for(const w of list){if(w&&w.address)m[String(w.address).toLowerCase()]=w}}}catch(e){}return m})();
+    const [cl,wmap,walletMap]=await Promise.all([clP,wmapP,ctWalletMap()]);
+    const tc=document.getElementById('ct-tracked');
+    if(tc) tc.textContent=Object.keys(wmap).length>0?(Object.keys(wmap).length+' whales tracked by the \uD83D\uDC33 tracker — stats below come from it'):'';
+    if(!cl||!cl.ok){document.getElementById('ct-live').innerHTML='<p class="empty">Copy lanes unavailable.</p>';document.getElementById('ct-paper').innerHTML='';return}
+    const lanes=cl.lanes||[];
+    const live=lanes.filter(l=>l.mode==='LIVE'||l.mode==='LIVE_LANE');
+    const paper=lanes.filter(l=>!(l.mode==='LIVE'||l.mode==='LIVE_LANE'));
+    document.getElementById('ct-live').innerHTML=live.length>0
+      ?live.map(ln=>ctCard(ln,walletMap[ln.walletId],wmap)).join('')
+      :'<p class="empty">No LIVE copy lanes. Create one: Wallets tab &rarr; Create &rarr; strategy COPY TRADE with mode LIVE LANE.</p>';
+    document.getElementById('ct-paper').innerHTML=paper.length>0
+      ?paper.map(ln=>ctCard(ln,walletMap[ln.walletId],wmap)).join('')
+      :'<p class="empty">No DRY-RUN copy lanes.</p>';
+    loadCopyActivity(lanes);
   }catch(e){console.error(e)}
 }
 
+async function ctToggleWallet(walletId,isPaused){ await toggleWallet(walletId,isPaused); setTimeout(loadCopyTrade,400); }
 async function toggleCopyLink(walletId,address,enabled){
   try{
     const r=await fetch('/api/copy-links/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId,address:address,enabled:!enabled})});
     if(!r.ok){const j=await r.json().catch(()=>({}));alert(j.error||('Toggle failed ('+r.status+')'));return}
-    loadCopyLinks();
+    loadCopyTrade();
   }catch(e){console.error(e)}
+}
+async function addCopyLink(walletId){
+  const inp=document.getElementById('ct-add-'+walletId); if(!inp)return;
+  const address=(inp.value||'').trim(); if(!address){alert('Paste a 0x\u2026 whale address first.');return}
+  try{
+    const r=await fetch('/api/copy-links/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId,address:address})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('Add failed ('+r.status+')'));return}
+    loadCopyTrade();
+  }catch(e){alert('Add failed — network error')}
+}
+async function removeCopyLink(walletId,address){
+  if(!confirm('Unwire '+address.slice(0,10)+'\u2026 from this lane? A tracker-promoted whale can come back on its own — turn the link OFF instead to block it permanently.'))return;
+  try{
+    const r=await fetch('/api/copy-links/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId,address:address})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('Remove failed ('+r.status+')'));return}
+    loadCopyTrade();
+  }catch(e){alert('Remove failed — network error')}
+}
+async function addWhaleAllLanes(){
+  const inp=document.getElementById('ct-add-all'); if(!inp)return;
+  const address=(inp.value||'').trim(); if(!address){alert('Paste a 0x\u2026 whale address first.');return}
+  try{
+    const r=await fetch('/api/copy-trade/whales',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:address})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('Add failed ('+r.status+')'));return}
+    inp.value='';
+    loadCopyTrade();
+  }catch(e){alert('Add failed — network error')}
+}
+async function loadCopyActivity(lanes){
+  const el=document.getElementById('ct-activity');
+  try{
+    const r=await fetch('/api/trades/all');
+    if(!r.ok){el.innerHTML='<p class="empty">Activity unavailable ('+r.status+').</p>';return}
+    const d=await r.json();
+    const ids={}; for(const l of lanes) ids[l.walletId]=true;
+    const trades=(d.trades||[]).filter(t=>ids[t.walletId]||t.strategy==='copy_trade').slice(-15).reverse();
+    if(trades.length===0){el.innerHTML='<p class="empty">No copy fills yet — lanes copy when followed whales trade.</p>';return}
+    el.innerHTML='<div class="wallet-table" style="max-height:420px;overflow-y:auto"><table><thead><tr><th>Time</th><th>Lane</th><th>Market</th><th>Side</th><th>Outcome</th><th>Price</th><th>Size</th><th>PnL</th></tr></thead><tbody>'+
+      trades.map(t=>'<tr><td style="font-size:11px;white-space:nowrap">'+new Date(t.timestamp).toLocaleString()+'</td><td style="font-size:11px">'+t.walletName+'</td><td style="font-size:11px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+t.marketId+'">'+t.marketId+'</td><td>'+t.side+'</td><td>'+t.outcome+'</td><td>'+fmt(t.price,3)+'</td><td>'+fmt(t.size,1)+'</td><td class="'+pnlCls(t.realizedPnl)+'">$'+fmt(t.realizedPnl)+'</td></tr>').join('')+
+      '</tbody></table></div>';
+  }catch(e){el.innerHTML='<p class="empty">Activity unavailable.</p>'}
 }
 
 async function loadWhales(){

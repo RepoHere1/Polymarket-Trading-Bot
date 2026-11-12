@@ -85,6 +85,41 @@ describe('Copy links — operator OFF beats the tracker bridge', () => {
   });
 });
 
+describe('Copy links — per-lane ADD / REMOVE (Copy Trading tab)', () => {
+  it('removeWhaleAddress unwires the whale; re-adding is allowed (no sticky deny)', () => {
+    const s = mkInstance();
+    expect(s.addWhaleAddress(WHALE_A)).toBe(true);
+    expect(s.removeWhaleAddress(WHALE_A)).toBe(true);
+    expect(s.getWhaleAddresses()).toEqual([]);
+    expect(s.isWhaleDenied(WHALE_A)).toBe(false);
+    /* REMOVE is not a block — an operator ADD can wire the whale again */
+    expect(s.addWhaleAddress(WHALE_A)).toBe(true);
+    expect(s.getWhaleAddresses()).toEqual([WHALE_A]);
+  });
+
+  it('allowWhaleAddress + removeWhaleAddress fully purges an OFF link (the /api/copy-links/remove wiring)', () => {
+    const s = mkInstance();
+    s.denyWhaleAddress(WHALE_A);
+    expect(s.allowWhaleAddress(WHALE_A)).toBe(true); // endpoint clears the deny first
+    expect(s.removeWhaleAddress(WHALE_A)).toBe(false); // never followed — still ok
+    expect(s.isWhaleDenied(WHALE_A)).toBe(false);
+    /* The bridge is free to re-add it later: REMOVE unwires, OFF blocks */
+    expect(syncTrackedWhalesIntoCopyTrade([s], [WHALE_A])).toBe(1);
+    expect(s.getWhaleAddresses()).toEqual([WHALE_A]);
+  });
+
+  it('per-lane add/remove never leaks into another lane', () => {
+    const a = mkInstance();
+    const b = new CopyTradeStrategy();
+    b.initialize({ wallet: mkWallet({ walletId: 'other_lane' }), config: {} });
+    a.addWhaleAddress(WHALE_A);
+    a.removeWhaleAddress(WHALE_A);
+    expect(b.getWhaleAddresses()).toEqual([]);
+    expect(a.addWhaleAddress(WHALE_B)).toBe(true);
+    expect(b.getWhaleAddresses()).toEqual([]);
+  });
+});
+
 describe('WalletStore v5 — copy-link denies + operator DELETE tombstones', () => {
   beforeEach(() => {
     try {
