@@ -4733,6 +4733,7 @@ function ctCard(ln,w,wmap){
   const isLive=ln.mode==='LIVE'||ln.mode==='LIVE_LANE';
   const paused=((w&&w.paused)||ln.paused||false);
   const on=ln.links.filter(l=>l.enabled).length;
+  const off=ln.links.length-on;
   /* Autonomous model: one shared whale universe per card. Tracked whales
      (with stats) rank by 30d PnL best-first; untracked (manual) sink last. */
   const sorted=ln.links.slice().sort((a,b)=>{
@@ -4749,15 +4750,23 @@ function ctCard(ln,w,wmap){
     '<div style="display:flex;align-items:center;gap:8px"><strong style="flex:1;font-size:14px;cursor:pointer" onclick="openWalletDetail(\\''+ln.walletId+'\\')" title="Open full analytics">'+(ln.displayName||ln.walletId)+'</strong>'+
     '<span class="badge badge-'+ln.mode+'">'+(ln.mode==='LIVE_LANE'?'LIVE LANE':ln.mode)+'</span>'+
     '<button class="toggle-btn '+(paused?'paused':'running')+'" onclick="ctToggleWallet(\\''+ln.walletId+'\\','+paused+')" title="'+(paused?'Start':'Pause')+' this lane"><span class="toggle-dot"></span>'+(paused?'\u25B6 Start':'\u23F8 Running')+'</button></div>'+
-    '<div style="font-size:12px">'+ctMoney(w)+'</div>'+
-    '<div style="display:flex;gap:14px;font-size:12px;flex-wrap:wrap">'+
-    '<span>Realized <span class="'+pnlCls(p.realizedPnl)+'">$'+fmt(p.realizedPnl)+'</span></span>'+
-    '<span>Unrealized <span class="'+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</span></span>'+
-    '<span>Total <span class="'+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</span></span>'+
-    '<span>WR '+(p.closedTrades>0?pct(p.winRate):'N/A')+'</span>'+
-    '<span title="Whale fills this lane copied">'+(ln.copied||0)+' copied &middot; '+(ln.openCopies||0)+' open</span>'+
-    '</div>'+
-    '<div><div style="font-size:11px;color:var(--muted);margin-bottom:2px">\uD83D\uDC33 Whales copied — <strong>'+on+' ON</strong> of '+ln.links.length+' linked'+(untracked>0?' <span style="color:var(--red)">&middot; '+untracked+' untracked</span>':'')+'</div>'+
+    (w
+      /* Same metric grid as Dashboard / LIVE THINGS wallet cards. */
+      ?'<div class="m-row">'+
+        '<div class="m-cell"><div class="m-label">'+(w.mode==='LIVE_LANE'?'LIVE ALLOTTED':(w.mode==='LIVE'?'LIVE ACCOUNT USD':'Capital'))+'</div><div class="m-val">'+usdOrSync(w,w.capitalAllocated,0)+'</div></div>'+
+        '<div class="m-cell"><div class="m-label">'+(w.mode==='PAPER'?'Available':'Cash Left')+'</div><div class="m-val">'+usdOrSync(w,w.availableBalance,2)+'</div></div>'+
+        '<div class="m-cell"><div class="m-label">Realized</div><div class="m-val '+pnlCls(p.realizedPnl)+'">$'+fmt(p.realizedPnl)+'</div></div>'+
+        '<div class="m-cell"><div class="m-label">Unrealized</div><div class="m-val '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
+        '<div class="m-cell"><div class="m-label">Total PnL</div><div class="m-val '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
+        '<div class="m-cell"><div class="m-label">Win Rate</div><div class="m-val">'+(p.closedTrades>0?pct(p.winRate):'N/A')+'</div></div>'+
+        '<div class="m-cell"><div class="m-label">Trades</div><div class="m-val">'+(p.totalTrades||0)+' <span style="font-size:10px;color:var(--muted)">('+(p.closedTrades||0)+' closed: '+(p.winCount||0)+'W/'+(p.lossCount||0)+'L)</span></div></div>'+
+        '<div class="m-cell"><div class="m-label">Whale Fills</div><div class="m-val" title="Whale fills this lane copied / open copy positions">'+(ln.copied||0)+' <span style="font-size:10px;color:var(--muted)">copied \u00B7 '+(ln.openCopies||0)+' open</span></div></div>'+
+        '</div>'
+      :'<div style="font-size:12px">'+ctMoney(w)+'</div>')+
+    '<div id="ct-spark-'+ln.walletId+'" style="margin:8px 0 2px"></div>'+
+    '<div><div style="font-size:11px;color:var(--muted);margin-bottom:2px">\uD83D\uDC33 Whales this lane follows — '+(paused
+      ?'<strong style="color:var(--red)">\u23F8 PAUSED — '+on+' wired, nothing copies until START</strong>'
+      :'<strong>'+on+' following now</strong>')+' \u00B7 '+off+' OFF-blocked \u00B7 of '+ln.links.length+' wired'+(untracked>0?' \u00B7 <span style="color:var(--red)">'+untracked+' untracked (no stats)</span>':'')+'</div>'+
     (sorted.length>0
       ?'<div style="max-height:'+(expanded?'420px':'170px')+';overflow-y:auto">'+visible.map(l=>ctWhaleRow(ln.walletId,l,wmap)).join('')+'</div>'
       :'<div class="ct-sub">None yet — add a whale with the bar above; every copy lane follows the same whale universe automatically.</div>')+
@@ -4768,6 +4777,67 @@ function ctCard(ln,w,wmap){
     (ln.links.length>0?'<button class="btn btn-sm" style="background:rgba(255,77,109,.08);color:var(--red);border:1px solid rgba(255,77,109,.35)" onclick="clearCopyLinks(\\''+ln.walletId+'\\')" title="Unwire EVERY whale from this lane — full reset of this lane\\u2019s whale wiring (whole-account LIVE wallets stay at zero: the tracker never re-wires them)">\u2702 Unwire ALL ('+ln.links.length+')</button>':'')+
     '</div></div>'+
     '</div>';
+}
+/* ── Real-fill sparklines for copy cards ──
+   Data = the lane's OWN trade history (/api/trades/:id, cumulative realized
+   PnL per REAL fill). Curved Catmull-Rom path, green when net ≥ 0, red when
+   net down. No synthetic points: fewer than 2 closed trades shows an honest
+   placeholder instead of a fake flat line. Present on every card by default
+   (existing and newly created) because it is part of the card renderer. */
+const ctSparkCache=new Map();
+async function ctRenderSparks(lanes){
+  for(const ln of lanes){
+    const wid=ln.walletId;
+    const c=ctSparkCache.get(wid);
+    if(!c||Date.now()-c.at>15000){
+      try{
+        const r=await fetch('/api/trades/'+encodeURIComponent(wid));
+        if(r.ok){
+          const d=await r.json();
+          const tr=(d&&d.trades)||[];
+          ctSparkCache.set(wid,{at:Date.now(),vals:tr.map(t=>Number(t.cumulativePnl)||0)});
+        }
+      }catch(e){}
+    }
+    ctPaintSpark(wid);
+  }
+}
+function ctPaintSpark(wid){
+  const el=document.getElementById('ct-spark-'+wid);
+  if(!el)return;
+  const c=ctSparkCache.get(wid);
+  const vals=(c&&c.vals)||[];
+  if(vals.length<2){
+    el.innerHTML='<div style="font-size:11px;color:var(--muted);padding:6px 0;border:1px dashed var(--border);border-radius:8px;text-align:center">\uD83D\uDCC8 PnL curve appears from real fills — '+(vals.length===1?'1 closed trade so far':'none yet')+'</div>';
+    return;
+  }
+  const W=460,H=52,pad=6;
+  const mn=Math.min(0,Math.min.apply(null,vals));
+  const mx=Math.max(0,Math.max.apply(null,vals));
+  const range=(mx-mn)||1;
+  const pts=vals.map((v,i)=>[pad+(i/(vals.length-1))*(W-pad*2), H-pad-((v-mn)/range)*(H-pad*2)]);
+  const last=vals[vals.length-1];
+  const color=last>=0?'var(--green)':'var(--red)';
+  const d=ctCurvedPath(pts);
+  const zeroY=(H-pad-((0-mn)/range)*(H-pad*2)).toFixed(1);
+  const area=d+'L'+(W-pad).toFixed(1)+','+(H-pad)+' L'+pad.toFixed(1)+','+(H-pad)+' Z';
+  el.innerHTML='<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-bottom:2px"><span>\uD83D\uDCC8 Realized PnL by real fill ('+vals.length+' trades)</span><span class="'+pnlCls(last)+'">$'+fmt(last)+'</span></div>'+
+    '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" style="width:100%;height:'+H+'px;display:block">'+
+    '<line x1="'+pad+'" y1="'+zeroY+'" x2="'+(W-pad)+'" y2="'+zeroY+'" stroke="var(--border)" stroke-dasharray="3,4" stroke-width="1"/>'+
+    '<path d="'+area+'" fill="'+(last>=0?'rgba(46,204,113,.10)':'rgba(255,77,106,.10)')+'" stroke="none"/>'+
+    '<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linecap="round"/>'+
+    '<circle cx="'+pts[pts.length-1][0].toFixed(1)+'" cy="'+pts[pts.length-1][1].toFixed(1)+'" r="2.6" fill="'+color+'"/>'+
+    '</svg>';
+}
+function ctCurvedPath(pts){
+  let d='M'+pts[0][0].toFixed(1)+','+pts[0][1].toFixed(1);
+  for(let i=0;i<pts.length-1;i++){
+    const p0=pts[Math.max(0,i-1)],p1=pts[i],p2=pts[i+1],p3=pts[Math.min(pts.length-1,i+2)];
+    d+='C'+(p1[0]+(p2[0]-p0[0])/6).toFixed(1)+','+(p1[1]+(p2[1]-p0[1])/6).toFixed(1)+' '
+       +(p2[0]-(p3[0]-p1[0])/6).toFixed(1)+','+(p2[1]-(p3[1]-p1[1])/6).toFixed(1)+' '
+       +p2[0].toFixed(1)+','+p2[1].toFixed(1);
+  }
+  return d;
 }
 async function loadCopyTrade(){
   try{
@@ -4789,6 +4859,7 @@ async function loadCopyTrade(){
       ?paper.map(ln=>ctCard(ln,walletMap[ln.walletId],wmap)).join('')
       :'<p class="empty">No DRY-RUN copy lanes.</p>';
     loadCopyActivity(lanes);
+    ctRenderSparks(lanes);
   }catch(e){console.error(e)}
 }
 
