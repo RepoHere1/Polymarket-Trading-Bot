@@ -73,6 +73,12 @@ export interface DashboardPayload {
   activeWallets: number;
   /** All wallets known to the manager (running, paused, or runner-less). */
   totalWallets: number;
+  /** Paper-only tallies (Dashboard tab): running/all PAPER wallets. */
+  paperActiveWallets: number;
+  paperTotalWallets: number;
+  /** Real-only tallies (LIVE THINGS tab): running/all LIVE + LIVE_LANE wallets. */
+  liveActiveWallets: number;
+  liveTotalWallets: number;
   wallets: WalletDashboardEntry[];
 }
 
@@ -229,6 +235,14 @@ export function buildDashboardPayload(
     liveUnrealizedPnl,
     paperRealizedPnl,
     paperUnrealizedPnl,
+    paperActiveWallets: runningWalletIds
+      ? paperEntries.filter((e) => runningWalletIds.has(e.walletId)).length
+      : paperEntries.length,
+    paperTotalWallets: paperEntries.length,
+    liveActiveWallets: runningWalletIds
+      ? liveEntries.filter((e) => runningWalletIds.has(e.walletId)).length
+      : liveEntries.length,
+    liveTotalWallets: liveEntries.length,
     totalPnl: Number((totalRealizedPnl + totalUnrealizedPnl).toFixed(4)),
     totalRealizedPnl: Number(totalRealizedPnl.toFixed(4)),
     totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),

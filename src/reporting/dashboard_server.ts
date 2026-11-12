@@ -1038,6 +1038,17 @@ export class DashboardServer {
     return prices;
   }
 
+  /** Copy instances eligible for whale-wiring ops ("add to every lane" /
+   *  bulk remove / tracker aggregate writes): everything EXCEPT whole-account
+   *  LIVE wallets. The one LIVE account wallet never auto-copies whales —
+   *  real-money copying runs on LIVE lanes the operator explicitly creates. */
+  private getWhaleWireableCopyInstances(): CopyTradeStrategy[] {
+    const liveAccounts = new Set(
+      this.walletManager.listWallets().filter((w) => w.mode === 'LIVE').map((w) => w.walletId),
+    );
+    return this.getCopyTradeInstances().filter((s) => !liveAccounts.has(s.getWalletId()));
+  }
+
   /** Get all running CopyTradeStrategy instances from the engine */
   private getCopyTradeInstances(): CopyTradeStrategy[] {
     if (!this.engine) return [];
@@ -1730,7 +1741,7 @@ export class DashboardServer {
         json(res, 400, { ok: false, error: 'Missing "address" field' });
         return;
       }
-      const instances = this.getCopyTradeInstances();
+      const instances = this.getWhaleWireableCopyInstances();
       if (instances.length === 0) {
         json(res, 404, { ok: false, error: 'No copy_trade strategy instances running' });
         return;
@@ -1754,7 +1765,7 @@ export class DashboardServer {
         json(res, 400, { ok: false, error: 'Missing address in URL' });
         return;
       }
-      const instances = this.getCopyTradeInstances();
+      const instances = this.getWhaleWireableCopyInstances();
       if (instances.length === 0) {
         json(res, 404, { ok: false, error: 'No copy_trade strategy instances running' });
         return;
@@ -1934,6 +1945,42 @@ export class DashboardServer {
         this.store().setWhaleDenied(walletId, address, false);
       }
       json(res, 200, { ok: true, walletId, pruned, following: inst.getWhaleAddresses().length });
+      return;
+    }
+
+    /* ─── JSON: unwire EVERY whale from one lane (operator bulk reset) ───
+       Used to fully disconnect a lane from the whale universe (e.g. the
+       whole-account LIVE wallet must never copy whales). Unwire semantics:
+       deny rows are cleared, so a later explicit add CAN re-wire — but the
+       tracker bridge and "add to every lane" skip whole-account LIVE wallets
+       entirely, so a LIVE account wallet stays at zero until the operator
+       deliberately re-adds whales lane by lane. */
+    if (path === '/api/copy-links/clear' && method === 'POST') {
+      const body = await readBody(req);
+      const walletId = ((body.walletId as string) || '').trim();
+      if (!walletId) {
+        json(res, 400, { ok: false, error: 'Need "walletId"' });
+        return;
+      }
+      const inst = this.engine?.getRunnerStrategy(walletId);
+      if (!(inst instanceof CopyTradeStrategy)) {
+        json(res, 404, { ok: false, error: `Wallet "${walletId}" is not a running copy_trade lane` });
+        return;
+      }
+      const addresses = inst.getWhaleAddresses();
+      for (const address of addresses) {
+        inst.allowWhaleAddress(address);
+        inst.removeWhaleAddress(address);
+        this.store().setWhaleDenied(walletId, address, false);
+      }
+      this.walletWhaleAddresses.delete(walletId);
+      this.persistPaperWallet(walletId); // persist the emptied list — no restore-resurrection
+      json(res, 200, {
+        ok: true,
+        walletId,
+        unwired: addresses.length,
+        following: inst.getWhaleAddresses().length,
+      });
       return;
     }
 
@@ -2621,6 +2668,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
   <div class="logo"><span>Poly</span>Market Strategies</div>
   <div class="tabs">
     <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+    <button class="tab-btn" data-tab="live">&#128308; LIVE THINGS</button>
     <button class="tab-btn" data-tab="markets">Markets</button>
     <button class="tab-btn" data-tab="wallets">Wallets</button>
     <button class="tab-btn" data-tab="strategies">Strategies</button>
@@ -2642,6 +2690,12 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
 <div class="tab-pane active" id="pane-dashboard">
   <div class="summary-row" id="summary"></div>
   <div class="wallet-grid" id="wallets"></div>
+</div>
+
+<!-- ═════════════ TAB 1B: LIVE THINGS (real money only) ═════════════ -->
+<div class="tab-pane" id="pane-live">
+  <div class="summary-row" id="summary-live"></div>
+  <div class="wallet-grid" id="wallets-live"></div>
 </div>
 
 <!-- ═════════════ TAB 2: WALLETS ═════════════ -->
@@ -3142,7 +3196,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
 <!-- ═══════════ COPY TRADING TAB ═══════════ -->
 <div class="tab-pane" id="pane-copytrade">
   <div class="section-title"><span class="icon">🤖</span> Copy Trading — every copy lane, LIVE split from DRY, whales wired per lane</div>
-  <p style="color:var(--accent);font-size:12px;margin:0 0 12px;max-width:980px">One card per COPY lane — no per-lane whale bookkeeping: <strong>every lane follows the same whale universe</strong> (added with the bar below + promoted by the 🐋 tracker) and autonomously copies everything those whales do. Whales are ranked best-first (30d PnL); switch a single link <strong>OFF</strong> to block one whale on one lane, <strong>&#10005;</strong> to unwire it. Any DRY-RUN card can spawn a <strong style="color:var(--red)">&#9873; LIVE twin</strong> — same whales, its own real-money budget from the one polymarket.us account, its own mandatory ON/OFF button. Orders stay preview-only until the bot is armed.</p>
+  <p style="color:var(--accent);font-size:12px;margin:0 0 12px;max-width:980px">One card per COPY lane — no per-lane whale bookkeeping: <strong>every lane follows the same whale universe</strong> (added with the bar below + promoted by the 🐋 tracker) and autonomously copies everything those whales do. Whales are ranked best-first (30d PnL); switch a single link <strong>OFF</strong> to block one whale on one lane, <strong>&#10005;</strong> to unwire it. Any DRY-RUN card can spawn a <strong style="color:var(--red)">&#9873; LIVE twin</strong> — same whales, its own real-money budget from the one polymarket.us account, its own mandatory ON/OFF button. The whole-account LIVE wallet itself never auto-copies whales — use the \u2702 Unwire ALL button on its card to disconnect it. Orders stay preview-only until the bot is armed.</p>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 16px">
     <input id="ct-add-all" placeholder="0x… whale address" style="font-family:monospace;width:340px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px">
     <button class="btn" onclick="addWhaleAllLanes()">+ Add whale — every lane copies it</button>
@@ -3309,33 +3363,42 @@ const pct = v => (v*100).toFixed(1)+'%';
 function pnlCls(v){return v>0?'pnl-pos':v<0?'pnl-neg':'pnl-zero'}
 function barCls(r){return r<.6?'bar-ok':r<.85?'bar-warn':'bar-danger'}
 
-/* ─── Dashboard Tab ─── */
+/* ─── Dashboard Tab (PAPER only) + LIVE THINGS Tab (real money only) ─── */
 function renderSummary(d){
-  /* Real money and simulation are NEVER blended into one number. LIVE capital
+  /* DASHBOARD TAB = PAPER ONLY. Real money is never blended in here —
+     it lives on the LIVE THINGS tab (renderSummaryLive). */
+  const pR=d.paperRealizedPnl||0, pU=d.paperUnrealizedPnl||0, pT=pR+pU;
+  $('#summary').innerHTML=
+    '<div class="s-card"><div class="label">Active Paper Wallets</div><div class="value">'+(d.paperActiveWallets ?? d.activeWallets)+' <span style="font-size:12px;opacity:.65">of '+(d.paperTotalWallets ?? d.totalWallets ?? 1)+'</span></div></div>'+
+    '<div class="s-card"><div class="label">Paper Capital (simulated)</div><div class="value">'+usd(d.paperCapital||0,0)+'</div><div style="font-size:11px;opacity:.6">not real money — real money is on the LIVE THINGS tab</div></div>'+
+    '<div class="s-card"><div class="label">Realized PnL (paper)</div><div class="value '+pnlCls(pR)+'">'+usd(pR)+'</div></div>'+
+    '<div class="s-card"><div class="label">Unrealized PnL (paper)</div><div class="value '+pnlCls(pU)+'">'+usd(pU)+'</div></div>'+
+    '<div class="s-card"><div class="label">Total PnL (paper)</div><div class="value '+pnlCls(pT)+'">'+usd(pT)+'</div></div>'+
+    '<div class="s-card"><div class="label">Engine Status</div><div class="value" style="font-size:16px;color:var(--green)">RUNNING</div></div>';
+}
+function renderSummaryLive(d){
+  /* LIVE THINGS TAB = REAL MONEY ONLY. Exchange truth everywhere: capital
      shows "syncing…" (title = the exchange's own error) until the exchange
-     answers; paper totals are labeled as simulated. */
+     answers; PnL shows "—" while unknown — never a guessy $0.00. */
   const liveErr=(d.wallets||[]).filter(w=>w.mode==='LIVE'&&w.exchangeError).map(w=>w.exchangeError).join('; ').replace(/"/g,'&quot;');
   const capTitle=liveErr?('polymarket.us error: '+liveErr):'Real USD reported by polymarket.us';
   const liveCap=(d.liveCapital===null||d.liveCapital===undefined)
     ?'<span style="color:var(--muted)" title="'+capTitle+'">syncing…</span>'
     :usd(d.liveCapital,0);
-  /* While no LIVE wallet has ever synced, real PnL is unknown — show "—"
-     (with the exchange error on hover), never a guessy $0.00. */
   const liveSynced=d.liveCapital!==null&&d.liveCapital!==undefined;
   const dashOr=v=>liveSynced?v:'<span style="color:var(--muted)" title="'+capTitle+'">—</span>';
   const liveR=d.liveRealizedPnl||0, liveU=d.liveUnrealizedPnl||0, liveT=liveR+liveU;
-  const pR=d.paperRealizedPnl||0, pU=d.paperUnrealizedPnl||0, pT=pR+pU;
-  $('#summary').innerHTML=
-    '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+' <span style="font-size:12px;opacity:.65">of '+(d.totalWallets ?? d.activeWallets)+'</span></div></div>'+
-    '<div class="s-card"><div class="label">Real Capital (LIVE)</div><div class="value" title="'+capTitle+'">'+liveCap+'</div><div style="font-size:11px;opacity:.6">Paper (simulated): '+usd(d.paperCapital||0,0)+'</div></div>'+
-    '<div class="s-card"><div class="label">Realized PnL (real)</div><div class="value '+pnlCls(liveR)+'">'+dashOr(usd(liveR))+'</div><div style="font-size:11px;opacity:.6">Paper: '+usd(pR)+'</div></div>'+
-    '<div class="s-card"><div class="label">Unrealized PnL (real)</div><div class="value '+pnlCls(liveU)+'">'+dashOr(usd(liveU))+'</div><div style="font-size:11px;opacity:.6">Paper: '+usd(pU)+'</div></div>'+
-    '<div class="s-card"><div class="label">Total PnL (real)</div><div class="value '+pnlCls(liveT)+'">'+dashOr(usd(liveT))+'</div><div style="font-size:11px;opacity:.6">Paper: '+usd(pT)+'</div></div>'+
+  const laneBudgets=((d.wallets)||[]).filter(w=>w.mode==='LIVE_LANE').reduce((s,w)=>s+(w.capitalAllocated||0),0);
+  $('#summary-live').innerHTML=
+    '<div class="s-card"><div class="label">Active LIVE Wallets</div><div class="value">'+(d.liveActiveWallets ?? 0)+' <span style="font-size:12px;opacity:.65">of '+(d.liveTotalWallets ?? 0)+'</span></div></div>'+
+    '<div class="s-card"><div class="label">Real Capital (LIVE exchange)</div><div class="value" title="'+capTitle+'">'+liveCap+'</div><div style="font-size:11px;opacity:.6">LIVE lane allotments: '+usd(laneBudgets,0)+' of it</div></div>'+
+    '<div class="s-card"><div class="label">Realized PnL (real)</div><div class="value '+pnlCls(liveR)+'">'+dashOr(usd(liveR))+'</div></div>'+
+    '<div class="s-card"><div class="label">Unrealized PnL (real)</div><div class="value '+pnlCls(liveU)+'">'+dashOr(usd(liveU))+'</div></div>'+
+    '<div class="s-card"><div class="label">Total PnL (real)</div><div class="value '+pnlCls(liveT)+'">'+dashOr(usd(liveT))+'</div></div>'+
     '<div class="s-card"><div class="label">Engine Status</div><div class="value" style="font-size:16px;color:var(--green)">RUNNING</div></div>';
 }
 
-function renderWallets(wl){
-  $('#wallets').innerHTML=wl.map(w=>{
+function walletCard(w){
     const p=w.performance;
     /* LIVE utilization is exchange truth only: null (—) until the exchange
        answers. Config capital minus a 0 balance must never show "100% used". */
@@ -3412,7 +3475,16 @@ function renderWallets(wl){
       '</div></div>'+
       posHtml+
       '</div></div>';
-  }).join('');
+}
+/* DASHBOARD TAB = PAPER ONLY — real-money wallets render on LIVE THINGS. */
+function renderWallets(wl){
+  $('#wallets').innerHTML=wl.filter(w=>w.mode==='PAPER').map(walletCard).join('');
+}
+function renderLiveWallets(wl){
+  const live=wl.filter(w=>w.mode==='LIVE'||w.mode==='LIVE_LANE');
+  $('#wallets-live').innerHTML=live.length>0
+    ?live.map(walletCard).join('')
+    :'<p class="empty">No LIVE wallets yet. Create one in the Wallets tab (LIVE account or LIVE LANE), or spawn a \u2691 LIVE twin from a Copy Trading card.</p>';
 }
 
 /* ─── Toggle wallet start/stop ─── */
@@ -4693,6 +4765,7 @@ function ctCard(ln,w,wmap){
     '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'+
     (!isLive?'<button class="btn btn-sm" style="background:rgba(255,77,109,.12);color:#ff4d6d;border:1px solid rgba(255,77,109,.35)" onclick="promoteLiveTwin(\\''+ln.walletId+'\\','+twinBudget+')" title="Create a LIVE twin lane on the polymarket.us account with the same whales — you set its budget, it gets its own ON/OFF button">\u2691 LIVE twin</button>':'')+
     (untracked>0?'<button class="btn btn-sm" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)" onclick="pruneManualLane(\\''+ln.walletId+'\\')" title="Unwire the '+untracked+' untracked (no-stats) whales from this lane — tracked whales stay">\uD83E\uDDF9 Unwire '+untracked+' untracked</button>':'')+
+    (ln.links.length>0?'<button class="btn btn-sm" style="background:rgba(255,77,109,.08);color:var(--red);border:1px solid rgba(255,77,109,.35)" onclick="clearCopyLinks(\\''+ln.walletId+'\\')" title="Unwire EVERY whale from this lane — full reset of this lane\\u2019s whale wiring (whole-account LIVE wallets stay at zero: the tracker never re-wires them)">\u2702 Unwire ALL ('+ln.links.length+')</button>':'')+
     '</div></div>'+
     '</div>';
 }
@@ -4751,6 +4824,15 @@ async function promoteLiveTwin(walletId,suggested){
     if(!r.ok){alert(j.error||('Create failed ('+r.status+')'));return}
     loadCopyTrade();
   }catch(e){alert('Create failed — network error')}
+}
+async function clearCopyLinks(walletId){
+  if(!confirm('Unwire EVERY whale from '+walletId+'? The lane stops copying everything until whales are re-added. (Whole-account LIVE wallets stay at zero — the tracker and the add-bar never re-wire them; real-money copying runs on LIVE lanes you create.)'))return;
+  try{
+    const r=await fetch('/api/copy-links/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('Clear failed ('+r.status+')'));return}
+    loadCopyTrade();
+  }catch(e){alert('Clear failed — network error')}
 }
 async function removeCopyLink(walletId,address){
   if(!confirm('Unwire '+address.slice(0,10)+'\u2026 from this lane? A tracker-promoted whale can come back on its own — turn the link OFF instead to block it permanently.'))return;
@@ -5748,7 +5830,9 @@ async function fetchDashboardData(){
     currentData = d;
     $('#hdr-ts').textContent = new Date(d.generatedAt).toLocaleString();
     renderSummary(d);
+    renderSummaryLive(d);
     renderWallets(d.wallets);
+    renderLiveWallets(d.wallets);
   }catch(e){console.error('fetchDashboardData error',e)}
 }
 
@@ -5767,7 +5851,9 @@ function connectSSE(){
         currentData = d;
         $('#hdr-ts').textContent = new Date(d.generatedAt).toLocaleString();
         renderSummary(d);
+        renderSummaryLive(d);
         renderWallets(d.wallets);
+        renderLiveWallets(d.wallets);
       }catch(e){console.error('SSE parse error',e)}
     });
     sse.onerror = function(){

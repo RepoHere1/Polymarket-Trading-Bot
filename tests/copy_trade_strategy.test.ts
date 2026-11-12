@@ -68,6 +68,15 @@ describe('syncTrackedWhalesIntoCopyTrade — whale tracker → copy bridge', () 
   });
 });
 
+describe('CopyTradeStrategy.getWalletId — identifies its lane (whale-wiring paths skip whole-account LIVE wallets)', () => {
+  it('returns the context wallet id, empty before initialize', () => {
+    const s = new CopyTradeStrategy();
+    expect(s.getWalletId()).toBe('');
+    s.initialize({ wallet: mkWallet({ walletId: 'live_main' }), config: {} });
+    expect(s.getWalletId()).toBe('live_main');
+  });
+});
+
 /** Build a mock data-api v2 response for whale trades — { data, pagination }
  *  envelope with snake_case rows, the shape verified live 2026-11-11. */
 function mkApiTrades(trades: Array<{

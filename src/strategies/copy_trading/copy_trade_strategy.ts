@@ -887,6 +887,14 @@ export class CopyTradeStrategy extends BaseStrategy {
     return [...this.cfg.whale_addresses];
   }
 
+  /** Wallet this lane trades for ('' before initialize). The whale-wiring
+   *  paths use this to skip whole-account LIVE wallets: a LIVE account wallet
+   *  never auto-copies whales — real-money copying runs on LIVE lanes the
+   *  operator explicitly creates. */
+  getWalletId(): string {
+    return this.context?.wallet.walletId ?? '';
+  }
+
   isWhaleDenied(address: string): boolean {
     return this.whaleDeny.has(address.toLowerCase().trim());
   }
