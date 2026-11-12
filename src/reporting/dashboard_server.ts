@@ -210,6 +210,12 @@ export function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], ma
       capitalAllocated: wallet.capitalAllocated,
       availableBalance: round(wallet.availableBalance),
       realizedPnl: round(wallet.realizedPnl),
+      /* Exchange-truth fields must reach the modal: without them the panel
+         says "syncing…" forever with NO reason — the modal needs
+         exchangeSynced/exchangeError to render the red LIVE-sync banner. */
+      exchangeUsd: wallet.exchangeUsd,
+      exchangeSynced: wallet.exchangeSynced,
+      exchangeError: wallet.exchangeError,
       openPositions: wallet.openPositions.map((p) => {
         const currentPrice = priceOf(p.marketId, p.outcome) ?? p.avgPrice;
         const uPnl = p.size > 0 && p.avgPrice > 0 ? (currentPrice - p.avgPrice) * p.size : 0;

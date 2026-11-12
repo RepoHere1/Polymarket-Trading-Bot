@@ -187,6 +187,16 @@ describe('wallet detail risk utilization is exchange-truth for LIVE', () => {
     const d = buildWalletDetail(state(), []); // 50 allocated, 30 available
     expect(d.risk.capitalUtilization).toBeCloseTo(0.4, 4);
   });
+
+  it('detail.wallet carries exchangeSynced/exchangeError so the modal can say WHY it is syncing', () => {
+    const d = buildWalletDetail(
+      state({ mode: 'LIVE', exchangeSynced: false, exchangeError: 'Invalid API key signature' }),
+      [],
+    );
+    expect(d.wallet.exchangeSynced).toBe(false);
+    expect(d.wallet.exchangeError).toBe('Invalid API key signature');
+    expect(d.wallet.exchangeUsd).toBeUndefined();
+  });
 });
 
 describe('dashboard NO positions price at 1 − YES mid', () => {
