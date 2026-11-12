@@ -927,6 +927,23 @@ export class DashboardServer {
       }
     });
 
+    this.server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        logger.error(
+          { port: this.port },
+          'Dashboard port already in use — another bot instance is running. ' +
+          'Use watch.ps1 to stream its log, or stop it before starting a new one.',
+        );
+        consoleLog.error(
+          'SYSTEM',
+          `Port ${this.port} is already in use by another bot instance. ` +
+          'This duplicate is exiting; the existing instance keeps running.',
+        );
+        process.exit(1);
+      }
+      logger.error({ err: err.message }, 'Dashboard server error');
+    });
+
     this.server.listen(this.port, () => {
       logger.info(
         { port: this.port, url: `http://localhost:${this.port}/dashboard` },

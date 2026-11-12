@@ -1,12 +1,12 @@
-# start_bot.ps1 — launch the Polymarket-Trading-Bot with secrets wired.
+# start_bot.ps1 - launch the Polymarket-Trading-Bot with secrets wired.
 #
 # Load order (later overrides earlier):
-#   1. repo-local .env          (gitignored — minimal, safe to keep here)
+#   1. repo-local .env          (gitignored - minimal, safe to keep here)
 #   2. D:\master.env            (the full machine credential registry)
 #   3. existing process env     (anything you set before calling this script)
 #
-# ENABLE_LIVE_TRADING is left UNSET by default → paper trading only.
-# Set $env:ENABLE_LIVE_TRADING='true' to arm a LIVE wallet.
+# ENABLE_LIVE_TRADING is left UNSET by default -> paper trading only.
+# Set $env:ENABLE_LIVE_TRADING='true' (or pass -Live) to arm a LIVE wallet.
 param(
     [string]$Config = "config.yaml",
     [switch]$Live
@@ -15,6 +15,10 @@ param(
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location -Path $repo
+
+# Canonical log file - watch.ps1 streams exactly this file.
+$botLog = Join-Path $repo '.runtime\bot_out.log'
+New-Item -ItemType Directory -Force -Path (Join-Path $repo '.runtime') | Out-Null
 
 function Merge-EnvFile($path) {
     if (-not (Test-Path $path)) { return }
@@ -31,7 +35,7 @@ function Merge-EnvFile($path) {
 
 # 1. repo-local .env
 Merge-EnvFile (Join-Path $repo ".env")
-# 2. master credential registry on D:
+# 2. master credential registry on D:\
 Merge-EnvFile "D:\master.env"
 # 3. safety: live trading must be explicitly opted into
 if ($Live) {
@@ -42,11 +46,28 @@ if ($Live) {
     Write-Host "PAPER TRADING MODE (safe default)"
 }
 
+# 4. duplicate-start guard: refuse to fight over the dashboard port.
+$dp = if ($env:DASHBOARD_PORT) { $env:DASHBOARD_PORT } else { "3000" }
+$owner = (netstat -ano | Select-String ":$dp\s.*LISTENING") |
+    ForEach-Object { ($_ -split '\s+')[-1] } | Select-Object -First 1
+if ($owner) {
+    $ownerCmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$owner" -ErrorAction SilentlyContinue).CommandLine
+    Write-Host ""
+    Write-Host "ABORTED: port $dp is already in use (PID $owner)." -ForegroundColor Red
+    if ($ownerCmd) { Write-Host "  that process: $ownerCmd" }
+    Write-Host "A bot instance is already running - the dashboard is at http://localhost:$dp/dashboard"
+    Write-Host "Stream its log with:  .\watch.ps1"
+    Write-Host "(To stop it:  Stop-Process -Id $owner )"
+    exit 1
+}
+
 Write-Host "POLYMARKET_API_KEY set: $([bool]$env:POLYMARKET_API_KEY)"
 Write-Host "OPENROUTER_API_KEY set:   $([bool]$env:OPENROUTER_API_KEY)"
 Write-Host "POLYGON_RPC set:         $([bool]$env:POLYGON_RPC)"
-$dp = if ($env:DASHBOARD_PORT) { $env:DASHBOARD_PORT } else { "3000" }
 Write-Host "Dashboard: http://localhost:$dp/dashboard"
+Write-Host "Logging to: $botLog"
 Write-Host ""
 
-node dist/cli.js start --config $Config
+# Fresh log per run so watch.ps1 never shows a dead instance's spam.
+Set-Content -Path $botLog -Value '' -NoNewline
+node dist/cli.js start --config $Config 2>&1 | Tee-Object -FilePath $botLog
