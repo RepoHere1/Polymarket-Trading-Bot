@@ -16,11 +16,41 @@ import { DashboardServer } from './reporting/dashboard_server';
 import { WhaleService } from './whales/whale_service';
 import { WhaleAPI } from './whales/whale_api';
 import { CopyTradeStrategy, syncTrackedWhalesIntoCopyTrade } from './strategies/copy_trading/copy_trade_strategy';
+import { WalletStore } from './storage/wallet_store';
 import { DEFAULT_WHALE_CONFIG, DEFAULT_SCANNER_CONFIG, DEFAULT_API_POOL_CONFIG, DEFAULT_FAST_SCAN_CONFIG, DEFAULT_EXCHANGE_SOURCES } from './whales/whale_types';
 import type { WhaleTrackingConfig, ScannerConfig } from './whales/whale_types';
 
 const program = new Command();
 const statePath = path.resolve('.runtime/state.json');
+
+/* ── Operator DELETE tombstones ──
+   The dashboard DELETE button is IMPERIAL OPERATOR LAW, but boot used to
+   recreate every config.yaml wallet — silently undoing the owner's delete on
+   every restart. Before config.yaml wallets are registered, drop the ones the
+   owner deleted from the dashboard (their ids are tombstoned in wallets.db).
+   Re-creating the same id from the dashboard clears the tombstone. */
+function applyOperatorDeletedWallets(config: ReturnType<typeof loadConfig>): void {
+  try {
+    const dbPath = process.env.WALLETS_DB_PATH
+      ? path.resolve(process.env.WALLETS_DB_PATH)
+      : path.resolve(__dirname, '..', '.runtime', 'wallets.db');
+    const store = new WalletStore(dbPath);
+    const deleted = new Set(store.listTombstones());
+    store.close();
+    if (deleted.size === 0) return;
+    const before = config.wallets.length;
+    config.wallets = config.wallets.filter((w) => !deleted.has(w.id));
+    const skipped = before - config.wallets.length;
+    if (skipped > 0) {
+      logger.warn(
+        { skipped, ids: config.wallets.length < before ? [...deleted] : [] },
+        `Config wallets SKIPPED: the operator deleted them from the dashboard — they stay deleted across restarts (re-create them in the dashboard to bring them back)`,
+      );
+    }
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'Could not read operator-deleted wallet tombstones — booting with all config wallets');
+  }
+}
 
 /* ── Config normalization helpers ── */
 
@@ -187,6 +217,7 @@ program
   .option('-c, --config <path>', 'Config path', 'config.yaml')
   .action(async (options: { config: string }) => {
     const config = loadConfig(options.config);
+    applyOperatorDeletedWallets(config);
     const walletManager = new WalletManager();
     for (const wallet of config.wallets) {
       walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading);

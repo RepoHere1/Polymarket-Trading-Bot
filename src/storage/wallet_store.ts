@@ -108,6 +108,22 @@ export class WalletStore {
     if (!cols4.some((c) => c.name === 'parent_wallet_id')) {
       this.db.exec('ALTER TABLE paper_wallets ADD COLUMN parent_wallet_id TEXT');
     }
+    /* v5 — operator DELETE tombstones (a config.yaml wallet deleted from the
+       dashboard must NEVER resurrect on boot; the owner's DELETE is law) and
+       per-lane whale deny lists (copy links the operator turned OFF — the
+       60s tracker bridge refuses to re-add them). */
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS deleted_wallet_ids (
+        wallet_id  TEXT PRIMARY KEY,
+        deleted_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS wallet_whale_denies (
+        wallet_id  TEXT NOT NULL,
+        address    TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (wallet_id, address)
+      );
+    `);
   }
 
   savePaperWallet(w: PersistedPaperWallet): void {
@@ -152,6 +168,73 @@ export class WalletStore {
 
   deleteWallet(walletId: string): void {
     this.db.prepare('DELETE FROM paper_wallets WHERE wallet_id = ?').run(walletId);
+    /* A deleted wallet's copy-link deny list is meaningless — drop it. */
+    this.clearWhaleDenies(walletId);
+  }
+
+  /* ━━ Operator DELETE tombstones (v5) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     The dashboard DELETE button removes a config.yaml wallet from the running
+     engine, but boot used to recreate every config.yaml entry — the owner's
+     delete was silently undone on every restart. A tombstone makes the
+     operator's DELETE outrank config.yaml at boot. Re-creating the same id
+     from the dashboard clears the tombstone. */
+
+  tombstoneWallet(walletId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO deleted_wallet_ids (wallet_id, deleted_at) VALUES (?, ?)
+         ON CONFLICT(wallet_id) DO NOTHING`,
+      )
+      .run(walletId, Date.now());
+  }
+
+  clearTombstone(walletId: string): void {
+    this.db.prepare('DELETE FROM deleted_wallet_ids WHERE wallet_id = ?').run(walletId);
+  }
+
+  listTombstones(): string[] {
+    const rows = this.db.prepare('SELECT wallet_id FROM deleted_wallet_ids').all() as Array<{
+      wallet_id: string;
+    }>;
+    return rows.map((r) => r.wallet_id);
+  }
+
+  /* ━━ Per-lane whale deny lists (v5) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     Copy links the operator turned OFF from the dashboard. The strategy's
+     addWhaleAddress refuses denied addresses, so the whale-tracker bridge
+     cannot re-enable them behind the operator's back. */
+
+  setWhaleDenied(walletId: string, address: string, denied: boolean): void {
+    if (denied) {
+      this.db
+        .prepare(
+          `INSERT INTO wallet_whale_denies (wallet_id, address, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(wallet_id, address) DO UPDATE SET updated_at = excluded.updated_at`,
+        )
+        .run(walletId, address, Date.now());
+    } else {
+      this.db
+        .prepare('DELETE FROM wallet_whale_denies WHERE wallet_id = ? AND address = ?')
+        .run(walletId, address);
+    }
+  }
+
+  listWhaleDenies(): Map<string, string[]> {
+    const rows = this.db.prepare('SELECT wallet_id, address FROM wallet_whale_denies').all() as Array<{
+      wallet_id: string;
+      address: string;
+    }>;
+    const out = new Map<string, string[]>();
+    for (const r of rows) {
+      const cur = out.get(r.wallet_id) ?? [];
+      cur.push(r.address);
+      out.set(r.wallet_id, cur);
+    }
+    return out;
+  }
+
+  clearWhaleDenies(walletId: string): void {
+    this.db.prepare('DELETE FROM wallet_whale_denies WHERE wallet_id = ?').run(walletId);
   }
 
   listPaperWallets(): PersistedPaperWallet[] {

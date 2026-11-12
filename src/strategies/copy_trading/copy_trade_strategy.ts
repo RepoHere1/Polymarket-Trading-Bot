@@ -842,9 +842,15 @@ export class CopyTradeStrategy extends BaseStrategy {
 
   /* ━━━━━━━━━━━━━━ Runtime whale address management ━━━━━━━━━━━━━━ */
 
-  /** Add a whale address at runtime. Returns false if already tracked. */
+  /** Per-lane copy links the operator turned OFF. addWhaleAddress refuses
+   *  denied addresses, so the 60s tracker bridge can never re-enable one
+   *  behind the operator's back. */
+  private readonly whaleDeny = new Set<string>();
+
+  /** Add a whale address at runtime. Returns false if already tracked or operator-denied. */
   addWhaleAddress(address: string): boolean {
     const addr = address.toLowerCase().trim();
+    if (this.whaleDeny.has(addr)) return false; // operator turned this copy link OFF
     if (!addr || this.cfg.whale_addresses.map(a => a.toLowerCase()).includes(addr)) return false;
     this.cfg.whale_addresses.push(addr);
     if (!this.whalePerf.has(addr)) {
@@ -879,6 +885,27 @@ export class CopyTradeStrategy extends BaseStrategy {
   /** Get the list of tracked whale addresses. */
   getWhaleAddresses(): string[] {
     return [...this.cfg.whale_addresses];
+  }
+
+  isWhaleDenied(address: string): boolean {
+    return this.whaleDeny.has(address.toLowerCase().trim());
+  }
+
+  /** Turn a copy link OFF: deny the address AND stop following it immediately.
+   *  The deny survives the tracker bridge, which calls addWhaleAddress. */
+  denyWhaleAddress(address: string): boolean {
+    const addr = address.toLowerCase().trim();
+    if (!addr) return false;
+    this.whaleDeny.add(addr);
+    const idx = this.cfg.whale_addresses.findIndex(a => a.toLowerCase() === addr);
+    if (idx !== -1) this.cfg.whale_addresses.splice(idx, 1);
+    logger.info({ strategy: this.name, address: addr }, 'Whale copy link DENIED by operator');
+    return true;
+  }
+
+  /** Turn a copy link back ON: clears the deny (the caller re-adds the address). */
+  allowWhaleAddress(address: string): boolean {
+    return this.whaleDeny.delete(address.toLowerCase().trim());
   }
 
   override shutdown(): void {

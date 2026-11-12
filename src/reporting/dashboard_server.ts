@@ -760,6 +760,21 @@ export class DashboardServer {
       this.attachRestoredRunner(r.walletId, r.strategy, r.paused, r.attachRunner, r.whaleAddresses);
     }
     this.pendingRestoredRunners = [];
+
+    /* Re-apply the operator's copy-link OFF choices. Every whale the operator
+       turned off for a lane stays off after a restart, and the 60s whale
+       tracker bridge cannot re-add it (addWhaleAddress refuses denied
+       addresses). */
+    try {
+      for (const [walletId, addrs] of this.store().listWhaleDenies()) {
+        const inst = engine.getRunnerStrategy(walletId);
+        if (inst instanceof CopyTradeStrategy) {
+          for (const a of addrs) inst.denyWhaleAddress(a);
+        }
+      }
+    } catch {
+      /* store unavailable or empty — nothing to re-apply */
+    }
   }
 
   private store(): WalletStore {
@@ -1313,6 +1328,7 @@ export class DashboardServer {
         this.liveEnvWalletIds.add(walletId);
         this.dashboardWalletIds.add(walletId);
         this.persistPaperWallet(walletId);
+        this.store().clearTombstone(walletId); // a fresh create always outranks an old operator delete
         json(res, 201, {
           ok: true,
           message: `LIVE lane "${walletId}" created on account "${parentWalletId}" (${strategy}, budget $${capital} of $${balance.toFixed(2)} buying power). The lane can never spend past its budget — keep the parent paused. Orders stay preview-only until POLYMARKET_DRY_RUN=false.`,
@@ -1423,6 +1439,7 @@ export class DashboardServer {
           });
       }
 
+      this.store().clearTombstone(walletId); // a fresh create always outranks an old operator delete
       const message =
         mode === 'LIVE'
           ? `LIVE wallet "${walletId}" created (${strategy}). Balance is EXCHANGE TRUTH: the real USD figure appears the moment polymarket.us accepts the credentials - until then the dashboard honestly shows "syncing..." (hover it for the exchange's answer). Credentials: ${
@@ -1438,6 +1455,10 @@ export class DashboardServer {
     /* ─── JSON: delete wallet ─── */
     if (path.startsWith('/api/wallets/') && !path.includes('/detail') && !path.includes('/pause') && !path.includes('/resume') && method === 'DELETE') {
       const walletId = decodeURIComponent(path.slice('/api/wallets/'.length));
+      /* Capture provenance BEFORE the bookkeeping below wipes it: config.yaml
+         wallets need a tombstone or the next boot resurrects them — the
+         operator's DELETE is law and must survive restarts. */
+      const wasDashboardWallet = this.dashboardWalletIds.has(walletId);
       const hostedLanes = this.walletManager.getLiveLanes(walletId);
       if (hostedLanes.length > 0) {
         json(res, 409, {
@@ -1452,12 +1473,21 @@ export class DashboardServer {
       this.liveEnvWalletIds.delete(walletId);
       this.liveLaneParents.delete(walletId);
       this.walletStore?.deleteWallet(walletId); // forget persisted PAPER wallets too
+      if (!wasDashboardWallet) {
+        /* config.yaml wallet: tombstone it so boot can never resurrect it. */
+        this.store().tombstoneWallet(walletId);
+      }
       if (this.engine) {
         this.engine.removeRunner(walletId);
       }
       const removed = this.walletManager.removeWallet(walletId);
       if (removed) {
-        json(res, 200, { ok: true, message: `Wallet "${walletId}" removed` });
+        json(res, 200, {
+          ok: true,
+          message: wasDashboardWallet
+            ? `Wallet "${walletId}" removed permanently`
+            : `Wallet "${walletId}" removed permanently — it will NOT come back on restart (config.yaml entry is operator-disabled; re-create it here to bring it back)`,
+        });
       } else {
         json(res, 404, { ok: false, error: `Wallet "${walletId}" not found` });
       }
@@ -1732,6 +1762,87 @@ export class DashboardServer {
       } else {
         json(res, 404, { ok: false, error: `Address "${address}" not found` });
       }
+      return;
+    }
+
+    /* ─── JSON: per-lane copy links (operator control panel) ───
+       Every copy_trade lane (PAPER and LIVE) with the whale addresses it
+       follows right now, plus the links the operator turned OFF. */
+    if (path === '/api/copy-links' && method === 'GET') {
+      const denies = this.store().listWhaleDenies();
+      const lanes: Array<{
+        walletId: string;
+        displayName: string;
+        mode: string;
+        paused: boolean;
+        links: Array<{ address: string; enabled: boolean }>;
+      }> = [];
+      for (const state of this.walletManager.listWallets()) {
+        if (state.assignedStrategy !== 'copy_trade') continue;
+        const inst = this.engine?.getRunnerStrategy(state.walletId);
+        const following =
+          inst instanceof CopyTradeStrategy
+            ? inst.getWhaleAddresses()
+            : this.walletWhaleAddresses.get(state.walletId) ?? [];
+        const seen = new Set<string>();
+        const links: Array<{ address: string; enabled: boolean }> = [];
+        for (const a of following) {
+          const addr = a.toLowerCase();
+          if (seen.has(addr)) continue;
+          seen.add(addr);
+          links.push({ address: addr, enabled: true });
+        }
+        for (const a of denies.get(state.walletId) ?? []) {
+          const addr = a.toLowerCase();
+          if (seen.has(addr)) continue;
+          seen.add(addr);
+          links.push({ address: addr, enabled: false });
+        }
+        lanes.push({
+          walletId: state.walletId,
+          displayName: this.walletDisplayNames.get(state.walletId) ?? state.walletId,
+          mode: state.mode,
+          paused: this.engine?.getPausedWallets().has(state.walletId) ?? false,
+          links,
+        });
+      }
+      json(res, 200, { ok: true, lanes });
+      return;
+    }
+
+    /* ─── JSON: per-lane copy link toggle (operator ON/OFF, persists) ─── */
+    if (path === '/api/copy-links/toggle' && method === 'POST') {
+      const body = await readBody(req);
+      const walletId = ((body.walletId as string) || '').trim();
+      const address = ((body.address as string) || '').toLowerCase().trim();
+      const enable = body.enabled === true;
+      if (!walletId || !/^0x[0-9a-f]{40}$/.test(address)) {
+        json(res, 400, { ok: false, error: 'Need "walletId" and a valid 0x… whale address' });
+        return;
+      }
+      const inst = this.engine?.getRunnerStrategy(walletId);
+      if (!(inst instanceof CopyTradeStrategy)) {
+        json(res, 404, { ok: false, error: `Wallet "${walletId}" is not a running copy_trade lane` });
+        return;
+      }
+      if (enable) {
+        inst.allowWhaleAddress(address);
+        if (!inst.addWhaleAddress(address)) {
+          json(res, 409, { ok: false, error: `Address ${address.slice(0, 10)}… is already followed on this lane` });
+          return;
+        }
+        this.store().setWhaleDenied(walletId, address, false);
+      } else {
+        inst.denyWhaleAddress(address); // stops following immediately AND blocks the tracker bridge
+        this.store().setWhaleDenied(walletId, address, true);
+      }
+      json(res, 200, {
+        ok: true,
+        walletId,
+        address,
+        enabled: enable,
+        following: inst.getWhaleAddresses().length,
+      });
       return;
     }
 
@@ -2332,6 +2443,7 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <button class="tab-btn" data-tab="strategies">Strategies</button>
     <button class="tab-btn" data-tab="analytics">Analytics</button>
     <button class="tab-btn" data-tab="whales">🐋 Whales</button>
+    <button class="tab-btn" data-tab="copylinks">🔗 Copy Links</button>
     <button class="tab-btn" data-tab="console">📟 Console</button>
   </div>
   <div class="header-right">
@@ -2844,6 +2956,13 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
   </div>
 </div>
 
+<!-- ═══════════ COPY LINKS TAB ═══════════ -->
+<div class="tab-pane" id="pane-copylinks">
+  <div class="section-title"><span class="icon">🔗</span> Copy Links — whale switches per lane (live + paper)</div>
+  <p style="color:var(--accent);font-size:12px;margin:0 0 14px;max-width:900px">Every whale each COPY TRADE lane follows, with an ON/OFF switch per link. OFF stops copying that whale immediately, survives restarts, and the whale-tracker bridge cannot re-enable it behind your back. PAPER lanes fake-copy; LIVE lanes preview real copy orders (dry-run until POLYMARKET_DRY_RUN=false). Newly promoted whales from the 🐋 Whale Tracker appear here automatically.</p>
+  <div id="cl-lanes"></div>
+</div>
+
 <!-- ═══════════ CONSOLE TAB ═══════════ -->
 <div class="tab-pane" id="pane-console">
   <!-- Sub-tab navigation -->
@@ -2981,6 +3100,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.getElementById('pane-' + btn.dataset.tab).classList.add('active');
     if(btn.dataset.tab==='markets') loadMarkets();
     if(btn.dataset.tab==='whales') loadWhales();
+    if(btn.dataset.tab==='copylinks') loadCopyLinks();
   });
 });
 
@@ -3145,6 +3265,15 @@ function renderWalletDetail(d){
     '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 '+usdTextOrSync(w,w.capitalAllocated,0)+(w.mode==='LIVE'?' exchange':' capital')+'</span></div>'+
     '<button class="toggle-btn '+stCls+'" onclick="toggleWalletFromDetail(\\''+w.walletId+'\\','+isPaused+')"><span class="toggle-dot"></span>'+(isPaused?'\u25B6 Start':'\u23F8 Pause')+'</button>'+
     '</div>';
+
+  /* ── LIVE sync-failure banner: say WHY the panel shows "syncing…" forever ── */
+  if((w.mode==='LIVE'||w.mode==='LIVE_LANE')&&!w.exchangeSynced&&w.exchangeError){
+    html+='<div style="margin:10px 0 0;padding:10px 12px;border:1px solid var(--red);border-radius:8px;background:rgba(255,77,106,.08);font-size:12px;line-height:1.7">'+
+      '<strong style="color:var(--red)">&#9888; LIVE sync failed — polymarket.us rejects the credentials</strong><br>'+
+      '<span style="font-family:monospace">exchange: '+String(w.exchangeError).split('"').join('&quot;')+'</span><br>'+
+      'Capital / Available / PnL below are NOT exchange truth — that is why this wallet only says "syncing…" and trades nothing. Fix: mint a matched Key ID + Secret Key pair at polymarket.us/developer, paste into .env and master.env, restart the bot.'+
+      '</div>';
+  }
 
   /* ── Copy-trade whales this wallet follows (per-wallet, from create form) ── */
   if(w.strategy==='copy_trade'){
@@ -4268,6 +4397,38 @@ document.querySelectorAll('.wh-sub').forEach(btn=>{
     if(sub==='apipool')loadApiPool();
   });
 });
+
+async function loadCopyLinks(){
+  try{
+    const r=await fetch('/api/copy-links');
+    if(!r.ok){document.getElementById('cl-lanes').innerHTML='<p class="empty">Copy links unavailable ('+r.status+').</p>';return}
+    const d=await r.json();
+    const lanes=d.lanes||[];
+    if(lanes.length===0){document.getElementById('cl-lanes').innerHTML='<p class="empty">No copy_trade wallets yet. Create one (Wallets tab, strategy COPY TRADE) to link whales to it.</p>';return}
+    let html='';
+    for(const ln of lanes){
+      const badge=ln.mode==='LIVE_LANE'?'LIVE LANE':ln.mode;
+      const on=ln.links.filter(l=>l.enabled).length;
+      html+='<div class="wd-section" style="margin-bottom:14px"><h3>'+ln.displayName+' <span class="badge badge-'+ln.mode+'">'+badge+'</span> <span style="font-size:11px;color:var(--accent);font-weight:400">'+(ln.paused?'PAUSED':'RUNNING')+' &middot; '+on+' of '+ln.links.length+' link(s) ON</h3>';
+      if(ln.links.length===0){html+='<p class="empty">No whales linked yet — the whale tracker adds promoted whales here automatically.</p></div>';continue}
+      html+='<table class="wd-mkt-table"><thead><tr><th>Whale address</th><th style="width:130px">Copy link</th></tr></thead><tbody>';
+      for(const l of ln.links){
+        html+='<tr><td style="font-family:monospace;font-size:12px;word-break:break-all">'+l.address+'</td>'+
+          '<td><button class="toggle-btn '+(l.enabled?'running':'paused')+'" onclick="toggleCopyLink(\\''+ln.walletId+'\\',\\''+l.address+'\\','+l.enabled+')" title="'+(l.enabled?'Turn this copy link OFF (stops copying this whale; survives restarts)':'Turn this copy link back ON')+'"><span class="toggle-dot"></span>'+(l.enabled?'ON':'OFF')+'</button></td></tr>';
+      }
+      html+='</tbody></table></div>';
+    }
+    document.getElementById('cl-lanes').innerHTML=html;
+  }catch(e){console.error(e)}
+}
+
+async function toggleCopyLink(walletId,address,enabled){
+  try{
+    const r=await fetch('/api/copy-links/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId,address:address,enabled:!enabled})});
+    if(!r.ok){const j=await r.json().catch(()=>({}));alert(j.error||('Toggle failed ('+r.status+')'));return}
+    loadCopyLinks();
+  }catch(e){console.error(e)}
+}
 
 async function loadWhales(){
   try{
