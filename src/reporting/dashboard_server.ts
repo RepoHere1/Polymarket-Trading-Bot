@@ -2669,12 +2669,12 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
   <div class="tabs">
     <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
     <button class="tab-btn" data-tab="live">&#128308; LIVE THINGS</button>
+    <button class="tab-btn" data-tab="copytrade">🤖 Copy Trading</button>
     <button class="tab-btn" data-tab="markets">Markets</button>
     <button class="tab-btn" data-tab="wallets">Wallets</button>
     <button class="tab-btn" data-tab="strategies">Strategies</button>
     <button class="tab-btn" data-tab="analytics">Analytics</button>
     <button class="tab-btn" data-tab="whales">🐋 Whales</button>
-    <button class="tab-btn" data-tab="copytrade">🤖 Copy Trading</button>
     <button class="tab-btn" data-tab="console">📟 Console</button>
   </div>
   <div class="header-right">
