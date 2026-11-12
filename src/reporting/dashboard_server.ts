@@ -2985,6 +2985,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 /* ─── Helpers ─── */
 const $ = s => document.querySelector(s);
 const fmt = (v,d=2) => Number(v).toFixed(d);
+const usd = (v,d=2) => (Number(v)<0?'-$':'$')+Math.abs(Number(v)||0).toFixed(d);
 const pct = v => (v*100).toFixed(1)+'%';
 function pnlCls(v){return v>0?'pnl-pos':v<0?'pnl-neg':'pnl-zero'}
 function barCls(r){return r<.6?'bar-ok':r<.85?'bar-warn':'bar-danger'}
@@ -2998,15 +2999,19 @@ function renderSummary(d){
   const capTitle=liveErr?('polymarket.us error: '+liveErr):'Real USD reported by polymarket.us';
   const liveCap=(d.liveCapital===null||d.liveCapital===undefined)
     ?'<span style="color:var(--muted)" title="'+capTitle+'">syncing…</span>'
-    :'$'+fmt(d.liveCapital,0);
+    :usd(d.liveCapital,0);
+  /* While no LIVE wallet has ever synced, real PnL is unknown — show "—"
+     (with the exchange error on hover), never a guessy $0.00. */
+  const liveSynced=d.liveCapital!==null&&d.liveCapital!==undefined;
+  const dashOr=v=>liveSynced?v:'<span style="color:var(--muted)" title="'+capTitle+'">—</span>';
   const liveR=d.liveRealizedPnl||0, liveU=d.liveUnrealizedPnl||0, liveT=liveR+liveU;
   const pR=d.paperRealizedPnl||0, pU=d.paperUnrealizedPnl||0, pT=pR+pU;
   $('#summary').innerHTML=
     '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+' <span style="font-size:12px;opacity:.65">of '+(d.totalWallets ?? d.activeWallets)+'</span></div></div>'+
-    '<div class="s-card"><div class="label">Real Capital (LIVE)</div><div class="value" title="'+capTitle+'">'+liveCap+'</div><div style="font-size:11px;opacity:.6">Paper (simulated): $'+fmt(d.paperCapital||0,0)+'</div></div>'+
-    '<div class="s-card"><div class="label">Realized PnL (real)</div><div class="value '+pnlCls(liveR)+'">$'+fmt(liveR)+'</div><div style="font-size:11px;opacity:.6">Paper: $'+fmt(pR)+'</div></div>'+
-    '<div class="s-card"><div class="label">Unrealized PnL (real)</div><div class="value '+pnlCls(liveU)+'">$'+fmt(liveU)+'</div><div style="font-size:11px;opacity:.6">Paper: $'+fmt(pU)+'</div></div>'+
-    '<div class="s-card"><div class="label">Total PnL (real)</div><div class="value '+pnlCls(liveT)+'">$'+fmt(liveT)+'</div><div style="font-size:11px;opacity:.6">Paper: $'+fmt(pT)+'</div></div>'+
+    '<div class="s-card"><div class="label">Real Capital (LIVE)</div><div class="value" title="'+capTitle+'">'+liveCap+'</div><div style="font-size:11px;opacity:.6">Paper (simulated): '+usd(d.paperCapital||0,0)+'</div></div>'+
+    '<div class="s-card"><div class="label">Realized PnL (real)</div><div class="value '+pnlCls(liveR)+'">'+dashOr(usd(liveR))+'</div><div style="font-size:11px;opacity:.6">Paper: '+usd(pR)+'</div></div>'+
+    '<div class="s-card"><div class="label">Unrealized PnL (real)</div><div class="value '+pnlCls(liveU)+'">'+dashOr(usd(liveU))+'</div><div style="font-size:11px;opacity:.6">Paper: '+usd(pU)+'</div></div>'+
+    '<div class="s-card"><div class="label">Total PnL (real)</div><div class="value '+pnlCls(liveT)+'">'+dashOr(usd(liveT))+'</div><div style="font-size:11px;opacity:.6">Paper: '+usd(pT)+'</div></div>'+
     '<div class="s-card"><div class="label">Engine Status</div><div class="value" style="font-size:16px;color:var(--green)">RUNNING</div></div>';
 }
 
