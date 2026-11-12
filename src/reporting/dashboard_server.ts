@@ -1907,6 +1907,121 @@ export class DashboardServer {
       return;
     }
 
+    /* ─── JSON: per-lane bulk prune of UNTRACKED (manual, no-stats) whales ───
+       The operator picks which addresses from the client (the client derives
+       the untracked list from the whale tracker). Each prune is an unwire,
+       NOT a block — the OFF toggle remains the permanent block. */
+    if (path === '/api/copy-links/prune-manual' && method === 'POST') {
+      const body = await readBody(req);
+      const walletId = ((body.walletId as string) || '').trim();
+      const addresses = Array.isArray(body.addresses)
+        ? (body.addresses as unknown[]).map((a) => String(a).toLowerCase().trim())
+        : [];
+      if (!walletId || addresses.length === 0) {
+        json(res, 400, { ok: false, error: 'Need "walletId" and a non-empty "addresses" array' });
+        return;
+      }
+      const inst = this.engine?.getRunnerStrategy(walletId);
+      if (!(inst instanceof CopyTradeStrategy)) {
+        json(res, 404, { ok: false, error: `Wallet "${walletId}" is not a running copy_trade lane` });
+        return;
+      }
+      let pruned = 0;
+      for (const address of addresses) {
+        if (!/^0x[0-9a-f]{40}$/.test(address)) continue;
+        inst.allowWhaleAddress(address);
+        if (inst.removeWhaleAddress(address)) pruned++;
+        this.store().setWhaleDenied(walletId, address, false);
+      }
+      json(res, 200, { ok: true, walletId, pruned, following: inst.getWhaleAddresses().length });
+      return;
+    }
+
+    /* ─── JSON: promote a PAPER copy lane to a LIVE twin ───
+       Operator action from the Copy Trading tab: creates a LIVE_LANE on the
+       one polymarket.us account that copies the SAME whale set, with its own
+       budget (LIVE ALLOTTED) and its own mandatory ON/OFF button. Mirrors the
+       POST /api/wallets LIVE_LANE creation gates exactly (parent paused,
+       real buying power read, Σ lane budgets ≤ balance). */
+    if (path === '/api/copy-links/promote-live' && method === 'POST') {
+      const body = await readBody(req);
+      const walletId = ((body.walletId as string) || '').trim();
+      const budget = Number(body.budget ?? 0);
+      if (!walletId || !Number.isFinite(budget) || budget <= 0) {
+        json(res, 400, { ok: false, error: 'Need "walletId" and a "budget" number > 0' });
+        return;
+      }
+      const paper = this.walletManager.listWallets().find((w) => w.walletId === walletId);
+      if (!paper || paper.mode !== 'PAPER' || paper.assignedStrategy !== 'copy_trade') {
+        json(res, 400, { ok: false, error: `"${walletId}" is not a PAPER copy lane` });
+        return;
+      }
+      const twinId = `${walletId}_live`;
+      if (this.walletManager.listWallets().some((w) => w.walletId === twinId)) {
+        json(res, 409, { ok: false, error: `LIVE twin "${twinId}" already exists — it is in the REAL MONEY section above.` });
+        return;
+      }
+      const parent = this.walletManager
+        .listWallets()
+        .find((w) => w.mode === 'LIVE' && !this.walletManager.liveLaneParent(w.walletId));
+      if (!parent) {
+        json(res, 400, { ok: false, error: 'No LIVE account wallet found. Create (and pause) the LIVE account wallet first — lanes live under it.' });
+        return;
+      }
+      const pausedParent = this.engine?.getPausedWallets().has(parent.walletId) ?? false;
+      if (!pausedParent) {
+        json(res, 409, { ok: false, error: `Pause the account wallet "${parent.walletId}" first (\u23F8 on its card). An account wallet either trades itself OR hosts lanes — never both.` });
+        return;
+      }
+      const balance = await this.walletManager.getLiveAccountBalance(parent.walletId);
+      if (balance === null) {
+        json(res, 503, { ok: false, error: `Could not read the real balance of "${parent.walletId}" from polymarket.us — refusing to create the twin. Try again.` });
+        return;
+      }
+      const committed = this.walletManager.getLiveLanes(parent.walletId).reduce((sum, l) => sum + l.budget, 0);
+      if (committed + budget > balance) {
+        json(res, 400, { ok: false, error: `Twin budget $${budget} + existing lanes $${committed.toFixed(2)} exceeds the account's real buying power $${balance.toFixed(2)}. Lower the budget or delete a lane.` });
+        return;
+      }
+      const paperInst = this.engine?.getRunnerStrategy(walletId);
+      const whales = paperInst instanceof CopyTradeStrategy ? paperInst.getWhaleAddresses() : [];
+      const riskLimits = {
+        maxPositionSize: budget * 0.2,
+        maxExposurePerMarket: budget * 0.3,
+        maxDailyLoss: budget * 0.1,
+        maxOpenTrades: 10,
+        maxDrawdown: 0.2,
+      };
+      let lane;
+      try {
+        lane = this.walletManager.createLiveLaneWallet(
+          parent.walletId,
+          { id: twinId, mode: 'LIVE_LANE', strategy: 'copy_trade', capital: budget, riskLimits },
+          'copy_trade',
+        );
+      } catch (e) {
+        json(res, 503, { ok: false, error: `Could not attach the twin to the account (${e instanceof Error ? e.message : String(e)}). Restart the bot armed so the account factory exists, then retry.` });
+        return;
+      }
+      this.walletManager.addWallet(lane);
+      this.walletManager.registerLiveLane(parent.walletId, twinId, budget);
+      if (whales.length > 0) this.walletWhaleAddresses.set(twinId, whales);
+      if (this.engine) {
+        this.engine.addRunner(twinId, 'copy_trade', whales.length > 0 ? { whale_addresses: whales } : undefined);
+      }
+      this.liveLaneParents.set(twinId, parent.walletId);
+      this.liveEnvWalletIds.add(twinId);
+      this.dashboardWalletIds.add(twinId);
+      this.persistPaperWallet(twinId);
+      this.store().clearTombstone(twinId);
+      json(res, 201, {
+        ok: true,
+        twinId,
+        message: `LIVE twin "${twinId}" created on account "${parent.walletId}" — budget $${budget} of $${balance.toFixed(2)} buying power, copying the same ${whales.length} whale(s). Its ON/OFF button is on its card in the REAL MONEY section. Orders stay preview-only until the bot is armed.`,
+      });
+      return;
+    }
+
     /* ─── JSON: all trades across all wallets (for Trade Log) ─── */
     if (path === '/api/trades/all' && method === 'GET') {
       const allTradesMap = this.walletManager.getAllTradeHistories();
@@ -3027,10 +3142,10 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
 <!-- ═══════════ COPY TRADING TAB ═══════════ -->
 <div class="tab-pane" id="pane-copytrade">
   <div class="section-title"><span class="icon">🤖</span> Copy Trading — every copy lane, LIVE split from DRY, whales wired per lane</div>
-  <p style="color:var(--accent);font-size:12px;margin:0 0 12px;max-width:980px">One card per COPY TRADE lane. <strong style="color:var(--red)">REAL MONEY</strong> lanes spend only their allotment of your single polymarket.us account; <strong style="color:var(--blue)">DRY RUN</strong> lanes are paper simulation — they never touch real money. Each card lists the whales it copies: switch a link <strong>OFF</strong> to stop copying that whale permanently (survives restarts, the tracker cannot re-enable it), or <strong>&#10005;</strong> to unwire it (a tracked whale can come back on its own). Orders stay preview-only until the bot is armed for live trading.</p>
+  <p style="color:var(--accent);font-size:12px;margin:0 0 12px;max-width:980px">One card per COPY lane — no per-lane whale bookkeeping: <strong>every lane follows the same whale universe</strong> (added with the bar below + promoted by the 🐋 tracker) and autonomously copies everything those whales do. Whales are ranked best-first (30d PnL); switch a single link <strong>OFF</strong> to block one whale on one lane, <strong>&#10005;</strong> to unwire it. Any DRY-RUN card can spawn a <strong style="color:var(--red)">&#9873; LIVE twin</strong> — same whales, its own real-money budget from the one polymarket.us account, its own mandatory ON/OFF button. Orders stay preview-only until the bot is armed.</p>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 16px">
     <input id="ct-add-all" placeholder="0x… whale address" style="font-family:monospace;width:340px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px">
-    <button class="btn" onclick="addWhaleAllLanes()">+ Add whale to ALL lanes</button>
+    <button class="btn" onclick="addWhaleAllLanes()">+ Add whale — every lane copies it</button>
     <span id="ct-tracked" style="font-size:11px;color:var(--muted)"></span>
   </div>
   <div id="ct-live-wrap" style="margin-bottom:22px">
@@ -4529,6 +4644,7 @@ function ctProvBadge(w){
   return isPoly?'<span class="badge" style="background:rgba(0,214,143,.12);color:var(--green)">polywhaler</span>':(w?'<span class="badge badge-PAPER">tracker</span>':'<span class="badge badge-PAPER">manual</span>');
 }
 
+const ctExpanded=new Set();let ctWmapNow={},ctLanesNow=[];
 function ctWhaleRow(walletId,l,wmap){
   const w=wmap[l.address];
   const name=w&&w.displayName?('<strong>'+w.displayName+'</strong> '):'';
@@ -4545,6 +4661,18 @@ function ctCard(ln,w,wmap){
   const isLive=ln.mode==='LIVE'||ln.mode==='LIVE_LANE';
   const paused=((w&&w.paused)||ln.paused||false);
   const on=ln.links.filter(l=>l.enabled).length;
+  /* Autonomous model: one shared whale universe per card. Tracked whales
+     (with stats) rank by 30d PnL best-first; untracked (manual) sink last. */
+  const sorted=ln.links.slice().sort((a,b)=>{
+    const wa=wmap[a.address],wb=wmap[b.address];
+    if(wa&&wb)return Number(wb.realizedPnl30d||0)-Number(wa.realizedPnl30d||0);
+    if(wa)return -1; if(wb)return 1;
+    return a.address<b.address?-1:1;
+  });
+  const untracked=ln.links.filter(l=>!wmap[l.address]).length;
+  const expanded=ctExpanded.has(ln.walletId);
+  const visible=expanded?sorted:sorted.slice(0,8);
+  const twinBudget=(w&&w.capitalAllocated)||50;
   return '<div class="ct-card '+(isLive?'live':'paper')+'">'+
     '<div style="display:flex;align-items:center;gap:8px"><strong style="flex:1;font-size:14px;cursor:pointer" onclick="openWalletDetail(\\''+ln.walletId+'\\')" title="Open full analytics">'+(ln.displayName||ln.walletId)+'</strong>'+
     '<span class="badge badge-'+ln.mode+'">'+(ln.mode==='LIVE_LANE'?'LIVE LANE':ln.mode)+'</span>'+
@@ -4557,11 +4685,15 @@ function ctCard(ln,w,wmap){
     '<span>WR '+(p.closedTrades>0?pct(p.winRate):'N/A')+'</span>'+
     '<span title="Whale fills this lane copied">'+(ln.copied||0)+' copied &middot; '+(ln.openCopies||0)+' open</span>'+
     '</div>'+
-    '<div><div style="font-size:11px;color:var(--muted);margin-bottom:2px">\uD83D\uDC33 Whales copied — <strong>'+on+' ON</strong> of '+ln.links.length+' linked</div>'+
-    (ln.links.length>0
-      ?'<div style="max-height:170px;overflow-y:auto">'+ln.links.map(l=>ctWhaleRow(ln.walletId,l,wmap)).join('')+'</div>'
-      :'<div class="ct-sub">None yet — the \uD83D\uDC33 Whale Tracker promotes whales here automatically, or add one below.</div>')+
-    '<div style="display:flex;gap:6px;margin-top:6px"><input id="ct-add-'+ln.walletId+'" placeholder="0x\u2026 add whale to THIS lane" style="flex:1;font-family:monospace;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px"><button class="btn btn-sm" onclick="addCopyLink(\\''+ln.walletId+'\\')">+ Add</button></div></div>'+
+    '<div><div style="font-size:11px;color:var(--muted);margin-bottom:2px">\uD83D\uDC33 Whales copied — <strong>'+on+' ON</strong> of '+ln.links.length+' linked'+(untracked>0?' <span style="color:var(--red)">&middot; '+untracked+' untracked</span>':'')+'</div>'+
+    (sorted.length>0
+      ?'<div style="max-height:'+(expanded?'420px':'170px')+';overflow-y:auto">'+visible.map(l=>ctWhaleRow(ln.walletId,l,wmap)).join('')+'</div>'
+      :'<div class="ct-sub">None yet — add a whale with the bar above; every copy lane follows the same whale universe automatically.</div>')+
+    (sorted.length>8?'<button class="btn btn-sm" style="margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);font-size:11px;padding:4px 10px" onclick="ctToggleExpand(\\''+ln.walletId+'\\')">'+(expanded?'\u2212 Collapse':'+ Show all '+sorted.length+' whales')+'</button>':'')+
+    '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'+
+    (!isLive?'<button class="btn btn-sm" style="background:rgba(255,77,109,.12);color:#ff4d6d;border:1px solid rgba(255,77,109,.35)" onclick="promoteLiveTwin(\\''+ln.walletId+'\\','+twinBudget+')" title="Create a LIVE twin lane on the polymarket.us account with the same whales — you set its budget, it gets its own ON/OFF button">\u2691 LIVE twin</button>':'')+
+    (untracked>0?'<button class="btn btn-sm" style="background:var(--surface2);color:var(--text);border:1px solid var(--border)" onclick="pruneManualLane(\\''+ln.walletId+'\\')" title="Unwire the '+untracked+' untracked (no-stats) whales from this lane — tracked whales stay">\uD83E\uDDF9 Unwire '+untracked+' untracked</button>':'')+
+    '</div></div>'+
     '</div>';
 }
 async function loadCopyTrade(){
@@ -4569,10 +4701,12 @@ async function loadCopyTrade(){
     const clP=(async()=>{try{const r=await fetch('/api/copy-links');return r.ok?await r.json():null}catch(e){return null}})();
     const wmapP=(async()=>{const m={};try{const wr=await fetch('/api/whales');if(wr.ok){const wd=await wr.json();const list=Array.isArray(wd)?wd:(wd.whales||[]);for(const w of list){if(w&&w.address)m[String(w.address).toLowerCase()]=w}}}catch(e){}return m})();
     const [cl,wmap,walletMap]=await Promise.all([clP,wmapP,ctWalletMap()]);
+    ctWmapNow=wmap;
     const tc=document.getElementById('ct-tracked');
     if(tc) tc.textContent=Object.keys(wmap).length>0?(Object.keys(wmap).length+' whales tracked by the \uD83D\uDC33 tracker — stats below come from it'):'';
     if(!cl||!cl.ok){document.getElementById('ct-live').innerHTML='<p class="empty">Copy lanes unavailable.</p>';document.getElementById('ct-paper').innerHTML='';return}
     const lanes=cl.lanes||[];
+    ctLanesNow=lanes;
     const live=lanes.filter(l=>l.mode==='LIVE'||l.mode==='LIVE_LANE');
     const paper=lanes.filter(l=>!(l.mode==='LIVE'||l.mode==='LIVE_LANE'));
     document.getElementById('ct-live').innerHTML=live.length>0
@@ -4593,15 +4727,30 @@ async function toggleCopyLink(walletId,address,enabled){
     loadCopyTrade();
   }catch(e){console.error(e)}
 }
-async function addCopyLink(walletId){
-  const inp=document.getElementById('ct-add-'+walletId); if(!inp)return;
-  const address=(inp.value||'').trim(); if(!address){alert('Paste a 0x\u2026 whale address first.');return}
+function ctToggleExpand(walletId){ if(ctExpanded.has(walletId))ctExpanded.delete(walletId);else ctExpanded.add(walletId); loadCopyTrade(); }
+async function pruneManualLane(walletId){
+  const ln=ctLanesNow.find(l=>l.walletId===walletId); if(!ln)return;
+  const addrs=ln.links.filter(l=>!ctWmapNow[l.address]).map(l=>l.address);
+  if(addrs.length===0){alert('No untracked whales on this lane.');return}
+  if(!confirm('Unwire '+addrs.length+' UNTRACKED (no-stats) whales from '+walletId+'?\\nTracked whales stay. This is an unwire, not a block — a tracker-promoted whale may return; re-add any address with the bar above.'))return;
   try{
-    const r=await fetch('/api/copy-links/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId,address:address})});
+    const r=await fetch('/api/copy-links/prune-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId,addresses:addrs})});
     const j=await r.json().catch(()=>({}));
-    if(!r.ok){alert(j.error||('Add failed ('+r.status+')'));return}
+    if(!r.ok){alert(j.error||('Prune failed ('+r.status+')'));return}
     loadCopyTrade();
-  }catch(e){alert('Add failed — network error')}
+  }catch(e){alert('Prune failed — network error')}
+}
+async function promoteLiveTwin(walletId,suggested){
+  const raw=prompt('Create a LIVE twin of "'+walletId+'" — it copies the SAME whales with REAL orders (preview-only until the bot is armed).\\n\\nLIVE ALLOTTED budget for this twin, in USD (drawn from the one polymarket.us account balance):',String(Math.max(1,Math.round(suggested||50))));
+  if(raw===null)return;
+  const budget=Number(raw);
+  if(!isFinite(budget)||budget<=0){alert('Enter a positive number for the budget.');return}
+  try{
+    const r=await fetch('/api/copy-links/promote-live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({walletId:walletId,budget:budget})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('Create failed ('+r.status+')'));return}
+    loadCopyTrade();
+  }catch(e){alert('Create failed — network error')}
 }
 async function removeCopyLink(walletId,address){
   if(!confirm('Unwire '+address.slice(0,10)+'\u2026 from this lane? A tracker-promoted whale can come back on its own — turn the link OFF instead to block it permanently.'))return;
