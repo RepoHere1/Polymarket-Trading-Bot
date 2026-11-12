@@ -34,6 +34,12 @@ export class WhaleDB {
      MIGRATIONS
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   private migrate(): void {
+    /* Capture BEFORE the schema exec: after it runs the index below exists,
+       and we need to know whether this is a LEGACY database that lived
+       through the ledger duplication bug (see wipe note after the exec). */
+    const settlementIdxExisted = !!this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_whale_settlement_whale'")
+      .get();
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS whales (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,7 +194,22 @@ export class WhaleDB {
       CREATE INDEX IF NOT EXISTS idx_signals_created           ON signals(created_at);
       CREATE INDEX IF NOT EXISTS idx_whale_candidates_rank     ON whale_candidates(rank_score DESC);
       CREATE INDEX IF NOT EXISTS idx_whale_trades_trade_id     ON whale_trades(trade_id);
+      CREATE INDEX IF NOT EXISTS idx_whale_settlement_whale    ON whale_settlement_ledger(whale_id, open_ts);
     `);
+
+    /* 2026-11-12 repair — the event-loop killer. buildSettlementLedger used
+       to re-append the whale's full history on EVERY analytics cycle without
+       deleting the previous rows, and whale_service ran it for all ~172
+       tracked whales per poll. Result on the incident box: 1.64M duplicated
+       ledger rows (366MB) with NO index — every ledger read was a full-table
+       scan of that pile in synchronous better-sqlite3, starving the event
+       loop until the dashboard stopped answering. The ledger is DERIVED data
+       (rebuilt from whale_trades), so a one-time wipe is safe and honest:
+       analytics rebuilds it correctly per whale on the next cycle. */
+    if (!settlementIdxExisted) {
+      this.db.exec('DELETE FROM whale_settlement_ledger');
+      logger.warn('WhaleDB: legacy duplicated settlement ledger wiped (analytics rebuilds it from trades)');
+    }
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -480,18 +501,29 @@ export class WhaleDB {
      SETTLEMENT LEDGER
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-  insertSettlementEntry(e: Omit<SettlementLedgerEntry, 'id'>): number {
-    const info = this.db.prepare(`
+  /* Replace ALL ledger rows for a whale in one transaction. The ledger is a
+     derived, whole-history view: every rebuild MUST delete the previous rows
+     or each analytics cycle re-appends the full history again (the 2026-11-12
+     1.64M-row duplication incident). */
+  replaceSettlementEntries(whaleId: number, entries: Omit<SettlementLedgerEntry, 'id'>[]): void {
+    const del = this.db.prepare('DELETE FROM whale_settlement_ledger WHERE whale_id = ?');
+    const insert = this.db.prepare(`
       INSERT INTO whale_settlement_ledger
         (whale_id, market_id, outcome, lot_id, open_ts, close_ts, qty,
          entry_price, exit_price_or_settlement, realized_pnl, fee_usd, method, is_estimated_fee)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      e.whaleId, e.marketId, e.outcome, e.lotId, e.openTs, e.closeTs,
-      e.qty, e.entryPrice, e.exitPriceOrSettlement, e.realizedPnl,
-      e.feeUsd, e.method, e.isEstimatedFee ? 1 : 0,
-    );
-    return Number(info.lastInsertRowid);
+    `);
+    const run = this.db.transaction((rows: Omit<SettlementLedgerEntry, 'id'>[]) => {
+      del.run(whaleId);
+      for (const e of rows) {
+        insert.run(
+          whaleId, e.marketId, e.outcome, e.lotId, e.openTs, e.closeTs,
+          e.qty, e.entryPrice, e.exitPriceOrSettlement, e.realizedPnl,
+          e.feeUsd, e.method, e.isEstimatedFee ? 1 : 0,
+        );
+      }
+    });
+    run(entries);
   }
 
   getSettlementEntries(whaleId: number): SettlementLedgerEntry[] {

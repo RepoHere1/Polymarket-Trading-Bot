@@ -105,6 +105,30 @@ describe('WhaleAnalytics — Settlement Ledger', () => {
     expect(totalPnl).toBeCloseTo(30, 1);
     expect(closed[0].method).toBe('AVG');
   });
+
+  it('rebuilding the ledger repeatedly does NOT duplicate rows (2026-11-12 event-loop killer)', () => {
+    const whale = db.addWhale('0xdup');
+
+    db.insertTrade(makeTrade(whale.id, 'b1', 'BUY', 0.40, 200, '2025-01-01T00:00:00Z'));
+    db.insertTrade(makeTrade(whale.id, 's1', 'SELL', 0.60, 100, '2025-01-02T00:00:00Z'));
+    db.insertTrade(makeTrade(whale.id, 's2', 'SELL', 0.80, 100, '2025-01-03T00:00:00Z'));
+
+    analytics.buildSettlementLedger(whale.id);
+    const first = db.getSettlementEntries(whale.id);
+    expect(first.length).toBeGreaterThan(0);
+    const firstPnl = first.reduce((s, e) => s + e.realizedPnl, 0);
+
+    // whale_service.refreshAllAnalytics runs on a 5-minute timer for every
+    // tracked whale — repeated rebuilds must leave exactly the same rows.
+    for (let i = 0; i < 6; i++) {
+      analytics.buildSettlementLedger(whale.id);
+      analytics.computeAllMetrics(whale.id);
+    }
+
+    const after = db.getSettlementEntries(whale.id);
+    expect(after.length).toBe(first.length); // identical count — no re-append
+    expect(after.reduce((s, e) => s + e.realizedPnl, 0)).toBeCloseTo(firstPnl, 6);
+  });
 });
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

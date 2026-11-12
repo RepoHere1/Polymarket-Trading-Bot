@@ -274,66 +274,72 @@ describe('WhaleDB — Positions', () => {
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 describe('WhaleDB — Settlement Ledger', () => {
-  it('inserts entries and computes settled PnL', () => {
+  it('replaces entries wholesale and computes settled PnL', () => {
     const whale = db.addWhale('0xsettle');
 
     // Open position
-    db.insertSettlementEntry({
-      whaleId: whale.id,
-      marketId: 'MKT-1',
-      outcome: 'YES',
-      lotId: 'lot-1',
-      openTs: '2025-01-01T00:00:00Z',
-      closeTs: '2025-01-05T00:00:00Z',
-      qty: 100,
-      entryPrice: 0.50,
-      exitPriceOrSettlement: 0.70,
-      realizedPnl: 20,
-      feeUsd: 0.5,
-      method: 'FIFO',
-      isEstimatedFee: false,
-    });
+    const entries = [
+      {
+        whaleId: whale.id,
+        marketId: 'MKT-1',
+        outcome: 'YES',
+        lotId: 'lot-1',
+        openTs: '2025-01-01T00:00:00Z',
+        closeTs: '2025-01-05T00:00:00Z',
+        qty: 100,
+        entryPrice: 0.50,
+        exitPriceOrSettlement: 0.70,
+        realizedPnl: 20,
+        feeUsd: 0.5,
+        method: 'FIFO' as const,
+        isEstimatedFee: false,
+      },
+      {
+        whaleId: whale.id,
+        marketId: 'MKT-2',
+        outcome: 'NO',
+        lotId: 'lot-2',
+        openTs: '2025-01-02T00:00:00Z',
+        closeTs: '2025-01-06T00:00:00Z',
+        qty: 50,
+        entryPrice: 0.40,
+        exitPriceOrSettlement: 0.30,
+        realizedPnl: -5,
+        feeUsd: 0.3,
+        method: 'FIFO' as const,
+        isEstimatedFee: true,
+      },
+    ];
 
-    db.insertSettlementEntry({
-      whaleId: whale.id,
-      marketId: 'MKT-2',
-      outcome: 'NO',
-      lotId: 'lot-2',
-      openTs: '2025-01-02T00:00:00Z',
-      closeTs: '2025-01-06T00:00:00Z',
-      qty: 50,
-      entryPrice: 0.40,
-      exitPriceOrSettlement: 0.30,
-      realizedPnl: -5,
-      feeUsd: 0.3,
-      method: 'FIFO',
-      isEstimatedFee: true,
-    });
-
+    db.replaceSettlementEntries(whale.id, entries);
     expect(db.getSettledPnl(whale.id)).toBe(15); // 20 + (-5)
+    expect(db.getSettlementEntries(whale.id)).toHaveLength(2);
+
+    // Replacing again leaves exactly the new rows — never appends (the
+    // 2026-11-12 duplication bug grew this table to 1.64M rows).
+    db.replaceSettlementEntries(whale.id, entries);
     expect(db.getSettlementEntries(whale.id)).toHaveLength(2);
   });
 
   it('computes win rate correctly', () => {
     const whale = db.addWhale('0xwinrate');
     // 2 wins, 1 loss
-    for (const [pnl, i] of [[10, 0], [5, 1], [-3, 2]] as [number, number][]) {
-      db.insertSettlementEntry({
-        whaleId: whale.id,
-        marketId: `MKT-${i}`,
-        outcome: 'YES',
-        lotId: `lot-${i}`,
-        openTs: `2025-01-0${i + 1}T00:00:00Z`,
-        closeTs: `2025-01-0${i + 2}T00:00:00Z`,
-        qty: 100,
-        entryPrice: 0.5,
-        exitPriceOrSettlement: 0.5 + pnl / 100,
-        realizedPnl: pnl,
-        feeUsd: 0,
-        method: 'FIFO',
-        isEstimatedFee: false,
-      });
-    }
+    const entries = [[10, 0], [5, 1], [-3, 2]].map(([pnl, i]) => ({
+      whaleId: whale.id,
+      marketId: `MKT-${i}`,
+      outcome: 'YES',
+      lotId: `lot-${i}`,
+      openTs: `2025-01-0${i + 1}T00:00:00Z`,
+      closeTs: `2025-01-0${i + 2}T00:00:00Z`,
+      qty: 100,
+      entryPrice: 0.5,
+      exitPriceOrSettlement: 0.5 + pnl / 100,
+      realizedPnl: pnl,
+      feeUsd: 0,
+      method: 'FIFO' as const,
+      isEstimatedFee: false,
+    }));
+    db.replaceSettlementEntries(whale.id, entries);
     const winRate = db.getWinRate(whale.id);
     expect(winRate).toBeCloseTo(2 / 3, 5);
   });

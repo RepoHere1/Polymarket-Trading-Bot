@@ -9,7 +9,7 @@ import type { WhaleDB } from './whale_db';
 import type {
   WhaleTrackingConfig, WhaleScoreBreakdown, TimingWindow,
   WhaleMetricsDaily, WhaleTrade, CostBasisMethod,
-  WhaleStyle,
+  WhaleStyle, SettlementLedgerEntry,
 } from './whale_types';
 
 interface Lot {
@@ -48,6 +48,13 @@ export class WhaleAnalytics {
 
     const method = this.config.costBasisMethod;
 
+    /* Collect the whole rebuilt ledger in memory and hand it to
+       replaceSettlementEntries, which deletes the whale's previous rows in
+       the SAME transaction — inserting row-by-row (the old way) meant every
+       rebuild re-appended the full history and the table grew by a full
+       history per analytics cycle (2026-11-12: 1.64M rows, dead dashboard). */
+    const entries: Omit<SettlementLedgerEntry, 'id'>[] = [];
+
     // Group trades by (marketId, outcome)
     const groups = new Map<string, WhaleTrade[]>();
     for (const t of allTrades) {
@@ -57,14 +64,17 @@ export class WhaleAnalytics {
     }
 
     for (const [, trades] of groups) {
-      this.processLotGroup(whaleId, trades, method);
+      this.processLotGroup(whaleId, trades, method, entries);
     }
+
+    this.db.replaceSettlementEntries(whaleId, entries);
   }
 
   private processLotGroup(
     whaleId: number,
     trades: WhaleTrade[],
     method: CostBasisMethod,
+    entries: Omit<SettlementLedgerEntry, 'id'>[],
   ): void {
     const lots: Lot[] = [];
     let lotCounter = 0;
@@ -82,7 +92,7 @@ export class WhaleAnalytics {
           entryPrice: trade.price,
         });
         // Record open entry
-        this.db.insertSettlementEntry({
+        entries.push({
           whaleId,
           marketId,
           outcome,
@@ -107,7 +117,7 @@ export class WhaleAnalytics {
             const closeQty = Math.min(remainingToClose, lot.qty);
             const realizedPnl = closeQty * (trade.price - lot.entryPrice);
 
-            this.db.insertSettlementEntry({
+            entries.push({
               whaleId,
               marketId,
               outcome,
@@ -135,7 +145,7 @@ export class WhaleAnalytics {
             const closeQty = Math.min(remainingToClose, totalQty);
             const realizedPnl = closeQty * (trade.price - avgPrice);
 
-            this.db.insertSettlementEntry({
+            entries.push({
               whaleId,
               marketId,
               outcome,
