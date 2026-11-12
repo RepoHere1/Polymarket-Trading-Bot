@@ -73,7 +73,9 @@ export interface DashboardPayload {
   activeWallets: number;
   /** All wallets known to the manager (running, paused, or runner-less). */
   totalWallets: number;
-  /** Paper-only tallies (Dashboard tab): running/all PAPER wallets. */
+  /** Paper-only tallies (Dashboard tab): PAPER wallets EXCLUDING copy_trade
+      lanes — copy lanes are managed (and their money shown) on the Copy
+      Trading tab. */
   paperActiveWallets: number;
   paperTotalWallets: number;
   /** Real-only tallies (LIVE THINGS tab): running/all LIVE + LIVE_LANE wallets. */
@@ -218,12 +220,16 @@ export function buildDashboardPayload(
             syncedLive.reduce((s, e) => s + (e.exchangeUsd ?? e.availableBalance), 0).toFixed(4),
           )
         : null; // LIVE exists, exchange never answered → unknown, never faked
-  const paperCapital = Number(paperEntries.reduce((s, e) => s + e.capitalAllocated, 0).toFixed(4));
+  /* Dashboard-tab paper tallies exclude copy_trade lanes (they live on the
+     Copy Trading tab, which sorts them live-first then paper). LIVE tallies
+     keep every LIVE/LIVE_LANE wallet: LIVE THINGS is the real-money view. */
+  const paperTabEntries = paperEntries.filter((e) => e.strategy !== 'copy_trade');
+  const paperCapital = Number(paperTabEntries.reduce((s, e) => s + e.capitalAllocated, 0).toFixed(4));
   const liveRealizedPnl = Number(liveEntries.reduce((s, e) => s + e.realizedPnl, 0).toFixed(4));
   const liveUnrealizedPnl = Number(liveEntries.reduce((s, e) => s + e.unrealizedPnl, 0).toFixed(4));
-  const paperRealizedPnl = Number(paperEntries.reduce((s, e) => s + e.realizedPnl, 0).toFixed(4));
+  const paperRealizedPnl = Number(paperTabEntries.reduce((s, e) => s + e.realizedPnl, 0).toFixed(4));
   const paperUnrealizedPnl = Number(
-    paperEntries.reduce((s, e) => s + e.unrealizedPnl, 0).toFixed(4),
+    paperTabEntries.reduce((s, e) => s + e.unrealizedPnl, 0).toFixed(4),
   );
 
   return {
@@ -236,9 +242,9 @@ export function buildDashboardPayload(
     paperRealizedPnl,
     paperUnrealizedPnl,
     paperActiveWallets: runningWalletIds
-      ? paperEntries.filter((e) => runningWalletIds.has(e.walletId)).length
-      : paperEntries.length,
-    paperTotalWallets: paperEntries.length,
+      ? paperTabEntries.filter((e) => runningWalletIds.has(e.walletId)).length
+      : paperTabEntries.length,
+    paperTotalWallets: paperTabEntries.length,
     liveActiveWallets: runningWalletIds
       ? liveEntries.filter((e) => runningWalletIds.has(e.walletId)).length
       : liveEntries.length,

@@ -3476,9 +3476,10 @@ function walletCard(w){
       posHtml+
       '</div></div>';
 }
-/* DASHBOARD TAB = PAPER ONLY — real-money wallets render on LIVE THINGS. */
+/* DASHBOARD TAB = PAPER ONLY and NO copy lanes — copy_trade wallets are
+   managed on the Copy Trading tab (live section first, then paper). */
 function renderWallets(wl){
-  $('#wallets').innerHTML=wl.filter(w=>w.mode==='PAPER').map(walletCard).join('');
+  $('#wallets').innerHTML=wl.filter(w=>w.mode==='PAPER'&&w.strategy!=='copy_trade').map(walletCard).join('');
 }
 function renderLiveWallets(wl){
   const live=wl.filter(w=>w.mode==='LIVE'||w.mode==='LIVE_LANE');

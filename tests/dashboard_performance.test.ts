@@ -164,6 +164,25 @@ describe('dashboard summary — running wallets and LIVE capital truth', () => {
     const payload = buildDashboardPayload([state()], new Map([['w1', []]]));
     expect(payload.liveCapital).toBeCloseTo(0, 4);
   });
+
+  it('paper tallies exclude copy_trade lanes; fleet totals still count them', () => {
+    const payload = buildDashboardPayload(
+      [
+        state({ walletId: 'p1', capitalAllocated: 100 }),
+        state({ walletId: 'p2', capitalAllocated: 200 }),
+        state({ walletId: 'copy1', assignedStrategy: 'copy_trade', capitalAllocated: 5 }),
+      ],
+      new Map([
+        ['p1', []],
+        ['p2', []],
+        ['copy1', []],
+      ]),
+    );
+    expect(payload.paperTotalWallets).toBe(2);
+    expect(payload.paperActiveWallets).toBe(2);
+    expect(payload.paperCapital).toBeCloseTo(300, 4);
+    expect(payload.totalWallets).toBe(3); // fleet-wide totals stay whole
+  });
 });
 
 describe('wallet detail risk utilization is exchange-truth for LIVE', () => {
