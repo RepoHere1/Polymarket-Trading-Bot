@@ -3162,6 +3162,24 @@ function renderWallets(wl){
     const toggleLabel = isPaused ? '\u25B6 Start' : '\u23F8 Running';
     const dName = w.displayName || w.walletId;
 
+    /* ── Money labels that say what the number IS ──
+       LIVE_LANE: the number is a HARD BUDGET carved out of the ONE real
+       polymarket.us account — never the account balance itself.
+       LIVE: whole-account exchange USD. PAPER: simulated capital. */
+    let capLabel='Capital', capVal=usdOrSync(w,w.capitalAllocated,0), avLabel='Available', avVal=usdOrSync(w,w.availableBalance,0), moneyStrip='';
+    if(w.mode==='LIVE_LANE'){
+      capLabel='LIVE ALLOTTED TO THIS LANE';
+      capVal='<span style="color:#ff9f43;font-weight:700">$'+fmt(w.capitalAllocated,0)+'</span>';
+      avLabel='LANE CASH LEFT';
+      avVal='$'+fmt(w.availableBalance,0);
+      const acct=(currentData&&currentData.liveCapital!==null&&currentData.liveCapital!==undefined)?('$'+fmt(currentData.liveCapital,0)):'syncing…';
+      moneyStrip='<div style="margin:10px 0 4px;padding:8px 10px;border:1px solid rgba(255,159,64,.35);background:rgba(255,159,64,.08);border-radius:8px;font-size:11px;line-height:1.6"><strong style="color:#ff9f43">HARD CAP $'+fmt(w.capitalAllocated,0)+'</strong> — this lane can spend ONLY this allotment of your single polymarket.us account (exchange holds '+acct+' total). The account wallet stays paused; the lane physically cannot overspend past this budget or touch money reserved for other lanes.</div>';
+    } else if(w.mode==='LIVE'){
+      capLabel='LIVE ACCOUNT USD';
+      avLabel='SPENDABLE (EXCHANGE)';
+      moneyStrip='<div style="margin:10px 0 4px;padding:8px 10px;border:1px solid rgba(255,77,106,.25);background:rgba(255,77,106,.06);border-radius:8px;font-size:11px;line-height:1.6">This is the <strong>ONE real-money account wallet</strong> — the figure is the whole polymarket.us balance. To run several strategies on it, keep this paused and add <strong>LIVE LANES</strong>: each lane gets its own allotment and cannot touch the others.</div>';
+    }
+
     /* ── Top 10 positions by total PnL ── */
     let posHtml='';
     if(w.openPositions.length>0){
@@ -3185,9 +3203,9 @@ function renderWallets(wl){
 
     return '<div class="w-card" style="cursor:pointer" onclick="openWalletDetail(\\''+w.walletId+'\\')" title="Click for detailed analytics">'+
       '<div class="w-hdr"><div class="w-left"><span class="w-id">'+dName+'</span><span class="w-strat">'+w.strategy+'</span></div><div style="display:flex;align-items:center;gap:8px"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><span class="badge badge-'+w.mode+'">'+(w.mode==='LIVE_LANE'?'LIVE LANE':w.mode)+'</span></div></div>'+
-      '<div class="w-body"><div class="m-row">'+
-      '<div class="m-cell"><div class="m-label">Capital</div><div class="m-val">'+usdOrSync(w,w.capitalAllocated,0)+'</div></div>'+
-      '<div class="m-cell"><div class="m-label">Available</div><div class="m-val">'+usdOrSync(w,w.availableBalance,0)+'</div></div>'+
+      '<div class="w-body">'+moneyStrip+'<div class="m-row">'+
+      '<div class="m-cell"><div class="m-label">'+capLabel+'</div><div class="m-val">'+capVal+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">'+avLabel+'</div><div class="m-val">'+avVal+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Realized</div><div class="m-val '+pnlCls(p.realizedPnl)+'">$'+fmt(p.realizedPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Unrealized</div><div class="m-val '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Total PnL</div><div class="m-val '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
@@ -3266,11 +3284,19 @@ function renderWalletDetail(d){
   /* ── Status bar ── */
   const stCls = isPaused ? 'paused' : 'running';
   const stText = isPaused ? 'PAUSED' : 'RUNNING';
+  const capWord = w.mode==='LIVE' ? ' exchange' : (w.mode==='LIVE_LANE' ? ' lane budget' : ' paper capital');
   html+='<div class="wd-status-bar">'+
     '<div class="wd-status-indicator '+stCls+'"></div>'+
-    '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 '+usdTextOrSync(w,w.capitalAllocated,0)+(w.mode==='LIVE'?' exchange':' capital')+'</span></div>'+
+    '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 '+usdTextOrSync(w,w.capitalAllocated,0)+capWord+'</span></div>'+
     '<button class="toggle-btn '+stCls+'" onclick="toggleWalletFromDetail(\\''+w.walletId+'\\','+isPaused+')"><span class="toggle-dot"></span>'+(isPaused?'\u25B6 Start':'\u23F8 Pause')+'</button>'+
     '</div>';
+
+  /* ── Budget-truth strip: what the money number above actually is ── */
+  if(w.mode==='LIVE_LANE'){
+    html+='<div style="margin:10px 0 0;padding:10px 12px;border:1px solid rgba(255,159,64,.35);background:rgba(255,159,64,.08);border-radius:8px;font-size:12px;line-height:1.7"><strong style="color:#ff9f43">HARD BUDGET $'+fmt(w.capitalAllocated,0)+'</strong> — this lane spends ONLY its allotment of your single polymarket.us account. Orders settle on the shared account, but the lane can never overspend past this budget or touch money reserved for other lanes.</div>';
+  } else if(w.mode==='LIVE'){
+    html+='<div style="margin:10px 0 0;padding:10px 12px;border:1px solid rgba(255,77,106,.25);background:rgba(255,77,106,.06);border-radius:8px;font-size:12px;line-height:1.7">Whole-account wallet — the figure above is the <strong>entire polymarket.us balance</strong>. To run several strategies on this one account, pause it and create <strong>LIVE LANES</strong> with separate allotments (Wallets tab &rarr; Create &rarr; LIVE LANE).</div>';
+  }
 
   /* ── LIVE sync-failure banner: say WHY the panel shows "syncing…" forever ── */
   if((w.mode==='LIVE'||w.mode==='LIVE_LANE')&&!w.exchangeSynced&&w.exchangeError){
@@ -3301,13 +3327,18 @@ function renderWalletDetail(d){
   /* ═══ TAB: Overview ═══ */
   html+='<div id="wdp-overview" class="wd-tab-panel'+(wdActiveTab==='overview'?' active':'')+'">';
 
-  /* Summary stats */
+  /* Summary stats — labels say what the money IS (lane allotment vs whole
+     account vs paper), so the number can never be misread. */
   html+='<div class="wd-summary">';
   const uPnl = w.openPositions.reduce((s,p) => s + (p.unrealizedPnl||0), 0);
   const tPnl = w.realizedPnl + uPnl;
+  const capStatLabel = w.mode==='LIVE_LANE' ? 'LIVE Allotted To This Lane' : (w.mode==='LIVE' ? 'LIVE Account USD' : 'Capital');
+  const avStatLabel = w.mode==='LIVE_LANE' ? 'Lane Cash Left' : (w.mode==='LIVE' ? 'Spendable (exchange)' : 'Available');
+  const capStatVal = w.mode==='LIVE_LANE' ? ('$'+fmt(w.capitalAllocated,0)) : usdOrSync(w,w.capitalAllocated,0);
+  const avStatVal = w.mode==='LIVE_LANE' ? ('$'+fmt(w.availableBalance,2)) : usdOrSync(w,w.availableBalance,2);
   const stats=[
-    ['Capital',usdOrSync(w,w.capitalAllocated,0),''],
-    ['Available',usdOrSync(w,w.availableBalance,2),''],
+    [capStatLabel,capStatVal,''],
+    [avStatLabel,avStatVal,''],
     ['Realized PnL','$'+fmt(w.realizedPnl),pnlCls(w.realizedPnl)],
     ['Unrealized PnL','$'+fmt(uPnl),pnlCls(uPnl)],
     ['Total PnL','$'+fmt(tPnl),pnlCls(tPnl)],
@@ -3819,8 +3850,9 @@ function renderWalletTable(wl){
       '<td><strong>'+w.walletId+'</strong> <span style="font-size:10px;color:var(--accent)">\uD83D\uDD0D</span></td>'+
       '<td><span class="badge badge-'+w.mode+'">'+(w.mode==='LIVE_LANE'?'LIVE LANE':w.mode)+'</span></td>'+
       '<td>'+w.assignedStrategy+'</td>'+
-      '<td>'+usdOrSync(w,w.capitalAllocated,0)+'</td>'+
-      '<td>'+usdOrSync(w,w.availableBalance,2)+'</td>'+
+      (w.mode==='LIVE_LANE'
+        ?'<td title="Hard cap carved from the single polymarket.us account — this lane can spend ONLY this much"><strong style="color:#ff9f43">$'+fmt(w.capitalAllocated,0)+'</strong> <span style="font-size:10px;color:var(--muted)">lane cap</span></td><td>$'+fmt(w.availableBalance,2)+' <span style="font-size:10px;color:var(--muted)">left</span></td>'
+        :'<td>'+usdOrSync(w,w.capitalAllocated,0)+'</td><td>'+usdOrSync(w,w.availableBalance,2)+'</td>')+
       '<td class="'+pnlCls(w.realizedPnl)+'">$'+fmt(w.realizedPnl)+'</td>'+
       '<td>'+w.openPositions.length+'</td>'+
       '<td style="display:flex;gap:6px;align-items:center"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteWallet(\\''+w.walletId+'\\')">Remove</button></td>'+
