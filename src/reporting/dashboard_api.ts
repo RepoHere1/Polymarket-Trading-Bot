@@ -24,6 +24,12 @@ export interface WalletDashboardEntry {
   strategy: string;
   capitalAllocated: number;
   availableBalance: number;
+  /** LIVE only: exchange-reported USD buying power (undefined = never synced). */
+  exchangeUsd?: number;
+  /** LIVE only: true once the exchange answered at least one balance request. */
+  exchangeSynced?: boolean;
+  /** LIVE only: last exchange sync error (cleared on success). */
+  exchangeError?: string;
   realizedPnl: number;
   unrealizedPnl: number;
   totalPnl: number;
@@ -154,6 +160,9 @@ export function buildDashboardPayload(
       strategy: w.assignedStrategy,
       capitalAllocated: w.capitalAllocated,
       availableBalance: Number(w.availableBalance.toFixed(4)),
+      exchangeUsd: w.exchangeUsd,
+      exchangeSynced: w.exchangeSynced,
+      exchangeError: w.exchangeError,
       realizedPnl: Number(w.realizedPnl.toFixed(4)),
       unrealizedPnl: Number(walletUnrealizedPnl.toFixed(4)),
       totalPnl: Number((w.realizedPnl + walletUnrealizedPnl).toFixed(4)),

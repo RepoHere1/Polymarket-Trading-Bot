@@ -157,6 +157,12 @@ export interface WalletState {
   openPositions: Position[];
   realizedPnl: number;
   riskLimits: RiskLimits;
+  /** LIVE only: last exchange-reported USD buying power (undefined = never synced). */
+  exchangeUsd?: number;
+  /** LIVE only: true once the exchange has answered at least one balance request. */
+  exchangeSynced?: boolean;
+  /** LIVE only: last exchange sync error (cleared on success) - surfaced in the UI. */
+  exchangeError?: string;
 }
 
 export interface TradeRecord {

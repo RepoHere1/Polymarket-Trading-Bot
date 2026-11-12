@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { PolymarketWallet, PolymarketClientLike } from '../src/wallets/polymarket_wallet';
+import { PolymarketWallet, PolymarketClientLike, normalizePolySecret } from '../src/wallets/polymarket_wallet';
 import { WalletConfig } from '../src/types';
 
 const config: WalletConfig = { id: 'live_test', mode: 'LIVE', strategy: 'test', capital: 1000 };
@@ -202,5 +202,52 @@ describe('PolymarketWallet (LIVE, polyUSA)', () => {
     const w = wallet({ fns });
     await w.refreshState(true);
     expect(w.getState().availableBalance).toBeCloseTo(450, 10);
+  });
+
+  it('EXCHANGE TRUTH ONLY: plain LIVE starts at 0, unsynced - the config capital is never shown as money', () => {
+    const w = wallet();
+    const s = w.getState();
+    expect(s.availableBalance).toBe(0);
+    expect(s.exchangeSynced).toBeFalsy();
+    expect(s.exchangeUsd).toBeUndefined();
+  });
+
+  it('successful sync marks exchangeSynced and exposes exchangeUsd', async () => {
+    const fns = makeFns();
+    const w = wallet({ fns });
+    await w.refreshState(true);
+    const s = w.getState();
+    expect(s.exchangeSynced).toBe(true);
+    expect(s.exchangeUsd).toBeCloseTo(450, 6);
+    expect(s.availableBalance).toBeCloseTo(450, 6);
+  });
+
+  it('a rejected sync records the exchange error and keeps balance honest (no fake number)', async () => {
+    const fns = makeFns({ balances: vi.fn().mockRejectedValue(new Error('401 Invalid API key signature')) });
+    const w = wallet({ fns });
+    await w.refreshState(); // non-forced: warns, keeps last known (0)
+    const s = w.getState();
+    expect(s.exchangeSynced).toBeFalsy();
+    expect(s.availableBalance).toBe(0);
+    expect(s.exchangeError).toMatch(/Invalid API key signature/);
+  });
+
+  it('normalizePolySecret converts base64url secrets to strict base64 (same bytes, atob-compatible)', () => {
+    // Leading 0xFF bytes force '+'/'/' (base64url '-'/'_') into the encoding.
+    const seed = Buffer.concat([Buffer.from([0xff, 0xff, 0xff, 0xff]), Buffer.from('a'.repeat(28), 'utf8')]); // 32 bytes
+    const b64url = seed.toString('base64url');
+    expect(b64url).toMatch(/[-_]/);
+    expect(() => atob(b64url)).toThrow();
+    const norm = normalizePolySecret(b64url);
+    expect(norm).not.toBe(b64url);
+    expect(() => atob(norm)).not.toThrow();
+    expect(Buffer.from(norm, 'base64').equals(seed)).toBe(true);
+  });
+
+  it('normalizePolySecret passes standard base64 through unchanged and trims whitespace', () => {
+    const seed = Buffer.from('0123456789abcdef0123456789abcdef', 'utf8');
+    const std = seed.toString('base64');
+    expect(normalizePolySecret(std)).toBe(std);
+    expect(normalizePolySecret('  ' + std + '\r\n')).toBe(std);
   });
 });

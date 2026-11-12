@@ -59,6 +59,25 @@ function formatPrice(price: number): string {
 }
 
 /**
+ * The polymarket.us developer portal can emit the Ed25519 secret in base64url
+ * (or unpadded) form, which the SDK's strict atob() rejects with
+ * "Invalid character" - killing every authenticated call. Re-encode to strict
+ * base64: identical bytes, identical signature, atob-compatible. Standard
+ * base64 passes through unchanged. Exported for tests.
+ */
+export function normalizePolySecret(secret: string): string {
+  const trimmed = secret.trim();
+  try {
+    atob(trimmed);
+    return trimmed;
+  } catch {
+    const bytes = Buffer.from(trimmed, 'base64');
+    if (bytes.length === 0) return trimmed;
+    return bytes.toString('base64');
+  }
+}
+
+/**
  * Production client factory: builds the polyUSA SDK client from env
  * credentials. Returns undefined when key/secret are missing so callers
  * fail closed instead of constructing an unauthenticated client.
@@ -67,7 +86,7 @@ function defaultClientFactory(): PolymarketClientLike | undefined {
   const keyId = process.env.POLYMARKET_API_KEY;
   const secretKey = process.env.POLYMARKET_API_SECRET;
   if (!keyId || !secretKey) return undefined;
-  return new PolymarketUS({ keyId, secretKey });
+  return new PolymarketUS({ keyId, secretKey: normalizePolySecret(secretKey) });
 }
 
 /**
@@ -79,7 +98,7 @@ export function polyUsaClientFactory(keyId: string, secretKey: string): () => Po
   let cached: PolymarketClientLike | undefined;
   return () => {
     if (cached) return cached;
-    cached = new PolymarketUS({ keyId, secretKey });
+    cached = new PolymarketUS({ keyId, secretKey: normalizePolySecret(secretKey) });
     return cached;
   };
 }
@@ -120,7 +139,10 @@ export class PolymarketWallet {
       mode: deps.budgetCap !== undefined ? 'LIVE_LANE' : 'LIVE',
       assignedStrategy,
       capitalAllocated: config.capital,
-      availableBalance: config.capital,
+      /* EXCHANGE TRUTH ONLY: a plain LIVE wallet starts at 0. The configured
+         capital is a label, never a balance - the first successful exchange
+         sync sets the real number. Lanes keep budget-ledger semantics. */
+      availableBalance: deps.budgetCap !== undefined ? config.capital : 0,
       openPositions: [],
       realizedPnl: 0,
       riskLimits: {
@@ -160,6 +182,9 @@ export class PolymarketWallet {
       if (usd.length > 0) {
         const total = usd.reduce((sum, b) => sum + (b.buyingPower ?? b.currentBalance ?? 0), 0);
         this.exchangeUsd = total;
+        this.state.exchangeUsd = total;
+        this.state.exchangeSynced = true;
+        this.state.exchangeError = undefined;
         if (this.budgetCap !== undefined) {
           this.syncCappedBalance();
         } else {
@@ -169,6 +194,7 @@ export class PolymarketWallet {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      this.state.exchangeError = msg;
       if (force) {
         throw new Error(`LIVE ${this.state.walletId}: account balance unavailable (${msg}) — refusing to trade`);
       }
@@ -202,10 +228,14 @@ export class PolymarketWallet {
       if (usd.length === 0) return null;
       const total = usd.reduce((sum, b) => sum + (b.buyingPower ?? b.currentBalance ?? 0), 0);
       this.exchangeUsd = total;
+      this.state.exchangeUsd = total;
+      this.state.exchangeSynced = true;
+      this.state.exchangeError = undefined;
       this.lastBalanceRefresh = this.deps.now?.() ?? Date.now();
       if (this.budgetCap !== undefined) this.syncCappedBalance();
       return total;
-    } catch {
+    } catch (err) {
+      this.state.exchangeError = err instanceof Error ? err.message : String(err);
       return null;
     }
   }

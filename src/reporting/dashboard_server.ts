@@ -1377,36 +1377,41 @@ export class DashboardServer {
         }
       }
 
-      /* PROOF OF LIVE WIRE: verify RIGHT NOW that this wallet is connected
-         to the real polymarket.us account — fetch the exchange balance and
-         log it as the factual wiring proof. Fire-and-forget: the response
-         does not wait on the network. */
+      /* PROOF OF LIVE WIRE - HONEST VERSION: verified ONLY when the exchange
+         actually answers with a real number. Any rejection logs the
+         exchange's own error so a bad Key ID / Secret pair is visible
+         immediately - never the config capital dressed up as a balance. */
       if (wallet instanceof PolymarketWallet) {
         void wallet
-          .refreshState(true)
-          .then(() => {
-            const usd = wallet.getState().availableBalance;
-            logger.info({ walletId, exchangeUsd: usd }, 'LIVE WIRE VERIFIED — polymarket.us account reachable');
-            consoleLog.success(
-              'WALLET',
-              `LIVE wire VERIFIED for "${walletId}": polymarket.us account reachable, exchange buying power $${usd.toFixed(2)}`,
-              { walletId, exchangeUsd: usd },
-            );
+          .getExchangeUsdBalance()
+          .then((usd) => {
+            if (usd === null) {
+              const err = wallet.getState().exchangeError ?? 'exchange returned no USD balance';
+              logger.error({ walletId, err }, 'LIVE WIRE NOT VERIFIED - polymarket.us rejected the request');
+              consoleLog.warn(
+                'WALLET',
+                `LIVE wire NOT verified for "${walletId}": polymarket.us rejected the request (${err}). The wallet stays wired and shows "syncing..." until the exchange accepts the credentials - verify the Key ID / Secret Key pair (polymarket.us/developer) matches exactly.`,
+                { walletId },
+              );
+            } else {
+              logger.info({ walletId, exchangeUsd: usd }, 'LIVE WIRE VERIFIED - polymarket.us account reachable');
+              consoleLog.success(
+                'WALLET',
+                `LIVE wire VERIFIED for "${walletId}": polymarket.us account reachable, exchange buying power $${usd.toFixed(2)}`,
+                { walletId, exchangeUsd: usd },
+              );
+            }
           })
           .catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
-            logger.warn({ walletId, err: msg }, 'LIVE wire verification failed (account unreachable right now)');
-            consoleLog.warn(
-              'WALLET',
-              `LIVE wire check for "${walletId}" could not reach polymarket.us yet (${msg}); the wallet stays wired and orders will still be attempted against the exchange`,
-              { walletId },
-            );
+            logger.error({ walletId, err: msg }, 'LIVE WIRE NOT VERIFIED - balance request failed');
+            consoleLog.warn('WALLET', `LIVE wire NOT verified for "${walletId}" (${msg})`, { walletId });
           });
       }
 
       const message =
         mode === 'LIVE'
-          ? `LIVE wallet "${walletId}" created (${strategy}, $${capital}). Fund it with USDC on polymarket.us — balance is read from the exchange. Credentials: ${
+          ? `LIVE wallet "${walletId}" created (${strategy}). Balance is EXCHANGE TRUTH: the real USD figure appears the moment polymarket.us accepts the credentials - until then the dashboard honestly shows "syncing..." (hover it for the exchange's answer). Credentials: ${
               importedCreds
                 ? 'imported (in-memory only - after a restart you must recreate the wallet; credentials are never written to disk)'
                 : 'environment (.env) - the wallet RECORD is persisted without secrets and is restored automatically on every restart'
@@ -3022,8 +3027,8 @@ function renderWallets(wl){
     return '<div class="w-card" style="cursor:pointer" onclick="openWalletDetail(\\''+w.walletId+'\\')" title="Click for detailed analytics">'+
       '<div class="w-hdr"><div class="w-left"><span class="w-id">'+dName+'</span><span class="w-strat">'+w.strategy+'</span></div><div style="display:flex;align-items:center;gap:8px"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><span class="badge badge-'+w.mode+'">'+(w.mode==='LIVE_LANE'?'LIVE LANE':w.mode)+'</span></div></div>'+
       '<div class="w-body"><div class="m-row">'+
-      '<div class="m-cell"><div class="m-label">Capital</div><div class="m-val">$'+fmt(w.capitalAllocated,0)+'</div></div>'+
-      '<div class="m-cell"><div class="m-label">Available</div><div class="m-val">$'+fmt(w.availableBalance,0)+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">Capital</div><div class="m-val">'+usdOrSync(w,w.capitalAllocated,0)+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">Available</div><div class="m-val">'+usdOrSync(w,w.availableBalance,0)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Realized</div><div class="m-val '+pnlCls(p.realizedPnl)+'">$'+fmt(p.realizedPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Unrealized</div><div class="m-val '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Total PnL</div><div class="m-val '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
@@ -3102,7 +3107,7 @@ function renderWalletDetail(d){
   const stText = isPaused ? 'PAUSED' : 'RUNNING';
   html+='<div class="wd-status-bar">'+
     '<div class="wd-status-indicator '+stCls+'"></div>'+
-    '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 $'+fmt(w.capitalAllocated,0)+' capital</span></div>'+
+    '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 '+usdTextOrSync(w,w.capitalAllocated,0)+(w.mode==='LIVE'?' exchange':' capital')+'</span></div>'+
     '<button class="toggle-btn '+stCls+'" onclick="toggleWalletFromDetail(\\''+w.walletId+'\\','+isPaused+')"><span class="toggle-dot"></span>'+(isPaused?'\u25B6 Start':'\u23F8 Pause')+'</button>'+
     '</div>';
 
@@ -3131,8 +3136,8 @@ function renderWalletDetail(d){
   const uPnl = w.openPositions.reduce((s,p) => s + (p.unrealizedPnl||0), 0);
   const tPnl = w.realizedPnl + uPnl;
   const stats=[
-    ['Capital','$'+fmt(w.capitalAllocated,0),''],
-    ['Available','$'+fmt(w.availableBalance),''],
+    ['Capital',usdOrSync(w,w.capitalAllocated,0),''],
+    ['Available',usdOrSync(w,w.availableBalance,2),''],
     ['Realized PnL','$'+fmt(w.realizedPnl),pnlCls(w.realizedPnl)],
     ['Unrealized PnL','$'+fmt(uPnl),pnlCls(uPnl)],
     ['Total PnL','$'+fmt(tPnl),pnlCls(tPnl)],
@@ -3264,8 +3269,8 @@ function renderWalletDetail(d){
   /* Wallet Performance Summary (read-only) */
   html+='<div class="ws-section"><h3>\uD83D\uDCCA Performance Snapshot</h3>'+
     '<div class="ws-form-grid">'+
-    '<div class="ws-field"><label>Capital Allocated</label><input type="text" value="$'+fmt(w.capitalAllocated,2)+'" disabled></div>'+
-    '<div class="ws-field"><label>Available Balance</label><input type="text" value="$'+fmt(w.availableBalance,2)+'" disabled></div>'+
+    '<div class="ws-field"><label>Capital Allocated</label><input type="text" value="'+usdTextOrSync(w,w.capitalAllocated,2)+'" disabled></div>'+
+    '<div class="ws-field"><label>Available Balance</label><input type="text" value="'+usdTextOrSync(w,w.availableBalance,2)+'" disabled></div>'+
     '<div class="ws-field"><label>Realized PnL</label><input type="text" value="$'+fmt(w.realizedPnl,4)+'" disabled style="color:'+(w.realizedPnl>=0?'var(--green)':'var(--red)')+'"></div>'+
     '<div class="ws-field"><label>Open Positions</label><input type="text" value="'+w.openPositions.length+'" disabled></div>'+
     '<div class="ws-field"><label>Total Trades</label><input type="text" value="'+s.totalTrades+'" disabled></div>'+
@@ -3640,8 +3645,8 @@ function renderWalletTable(wl){
       '<td><strong>'+w.walletId+'</strong> <span style="font-size:10px;color:var(--accent)">\uD83D\uDD0D</span></td>'+
       '<td><span class="badge badge-'+w.mode+'">'+(w.mode==='LIVE_LANE'?'LIVE LANE':w.mode)+'</span></td>'+
       '<td>'+w.assignedStrategy+'</td>'+
-      '<td>$'+fmt(w.capitalAllocated,0)+'</td>'+
-      '<td>$'+fmt(w.availableBalance,2)+'</td>'+
+      '<td>'+usdOrSync(w,w.capitalAllocated,0)+'</td>'+
+      '<td>'+usdOrSync(w,w.availableBalance,2)+'</td>'+
       '<td class="'+pnlCls(w.realizedPnl)+'">$'+fmt(w.realizedPnl)+'</td>'+
       '<td>'+w.openPositions.length+'</td>'+
       '<td style="display:flex;gap:6px;align-items:center"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteWallet(\\''+w.walletId+'\\')">Remove</button></td>'+
@@ -3984,6 +3989,9 @@ function cwToggleWhales(){
   if(row)row.style.display=$('#cw-strategy').value==='copy_trade'?'':'none';
 }
 
+function liveUsdCell(w,dec){if(w.mode!=='LIVE')return null;if(w.exchangeSynced&&typeof w.exchangeUsd==='number'&&isFinite(w.exchangeUsd))return '$'+fmt(w.exchangeUsd,dec);return '<span style="color:var(--accent)" title="'+(w.exchangeError?('exchange: '+String(w.exchangeError).split('"').join('')):'waiting for the exchange to accept the credentials')+'">syncing...</span>';}
+function usdOrSync(w,fallback,dec){const c=liveUsdCell(w,dec);return c!==null?c:('$'+fmt(fallback,dec));}
+function usdTextOrSync(w,fallback,dec){if(w.mode!=='LIVE')return '$'+fmt(fallback,dec);if(w.exchangeSynced&&typeof w.exchangeUsd==='number'&&isFinite(w.exchangeUsd))return '$'+fmt(w.exchangeUsd,dec);return 'syncing...';}
 function cwToggleCreds(){
   const live=$('#cw-mode').value==='LIVE';
   $('#cw-cred-key').style.display=live?'':'none';
@@ -4119,7 +4127,7 @@ function renderAnalytics(d){
     '<div class="an-stat-card"><div class="label">Total PnL</div><div class="value '+pnlCls(s.totalPnl)+'">$'+fmt(s.totalPnl)+'</div><div class="sub">Best: $'+fmt(s.bestTrade)+' / Worst: $'+fmt(s.worstTrade)+'</div></div>'+
     '<div class="an-stat-card"><div class="label">Win Rate</div><div class="value">'+(s.winRate*100).toFixed(1)+'%</div><div class="sub">'+s.winningTrades+'W / '+s.losingTrades+'L</div></div>'+
     '<div class="an-stat-card"><div class="label">Volume Traded</div><div class="value">$'+fmt(s.totalVolume,0)+'</div><div class="sub">Avg size: $'+fmt(s.avgTradeSize)+'</div></div>'+
-    '<div class="an-stat-card"><div class="label">Capital</div><div class="value">$'+fmt(s.capitalAllocated,0)+'</div><div class="sub">Available: $'+fmt(s.availableBalance)+'</div></div>';
+    '<div class="an-stat-card"><div class="label">Capital</div><div class="value">'+usdOrSync(s,s.capitalAllocated,0)+'</div><div class="sub">Available: '+usdOrSync(s,s.availableBalance,2)+'</div></div>';
 
   /* PnL chart */
   renderMiniChart('an-pnl-chart',d.trades.map(t=>t.cumulativePnl),'pnl');
