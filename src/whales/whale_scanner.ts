@@ -18,6 +18,7 @@ import type {
   RegimeState, MarketRegime,
   ExchangeSource,
 } from './whale_types';
+import { fetchV2TradesPage, fetchAllV2Trades, type LegacyDataApiTrade } from '../data/polymarket_data_api';
 
 /* ── Gamma market shape (subset) ── */
 interface GammaMarket {
@@ -209,22 +210,13 @@ class ApiPool {
       weight: 10,
     });
 
-    /* Additional data-api mirrors for throughput multiplication */
-    const dataApiMirrors = [
-      'https://data-api.polymarket.com',
-      'https://data-api.polymarket.com',  // same host, counted separately for rotation
-    ];
-    for (let i = 0; i < dataApiMirrors.length; i++) {
-      if (dataApiMirrors[i] !== builtInUrls.dataApi) {
-        this.addEndpoint({
-          name: `data-api-mirror-${i + 1}`,
-          url: dataApiMirrors[i],
-          type: 'data-api',
-          maxRequestsPerMinute: 60,
-          weight: 8,
-        });
-      }
-    }
+    /* Additional data-api mirrors: NONE by default.
+       HONESTY FIX 2026-11-11: this pool previously listed the SAME host
+       (data-api.polymarket.com) three times at 60 RPM each, fabricating a
+       180 RPM budget the real host never honoured — the resulting 429
+       storm was the "endpoint marked unhealthy" latch cycling ~58k times.
+       Real mirrors (a proxy, a mirror host) can be added via config
+       apiPool.endpoints; each must be a genuinely separate rate budget. */
 
     /* User-configured custom endpoints */
     for (const ue of userEndpoints) {
@@ -948,33 +940,24 @@ export class WhaleScanner {
   /* ━━━━━━━━━━━━━━ Step 2: Fetch trades per market (PARALLEL pages) ━━━━━━━━━━━━━━ */
 
   /**
-   * Fetch trade history for a single market.
-   * Pages 0..tradePageDepth are fired concurrently via Promise.allSettled.
-   * If any page returns empty or fails, its data is simply skipped.
-   * This is 3-5× faster than the old sequential page loop.
+   * Fetch trade history for a single market from the v2 Data API
+   * (cursor-paginated — pages walk sequentially; markets run in parallel
+   * via the scanner's semaphore). Empty/failing pages are skipped; if
+   * every page hard-fails the error propagates.
    */
   private async fetchMarketTrades(conditionId: string): Promise<ClobTrade[]> {
     const limit = this.scannerConfig.tradesPerMarket;
     const maxPages = this.scannerConfig.tradePageDepth;
 
-    interface DataApiTrade {
-      transactionHash?: string;
-      proxyWallet?: string;
-      side?: string;
-      size?: number | string;
-      price?: number | string;
-      timestamp?: number;
-      asset?: string;
-      outcome?: string;
-      conditionId?: string;
-    }
+    const ep = this.apiPool.pick('data-api');
+    const baseUrl = ep ? ep.url : this.dataApi;
 
-    const fetchPage = async (pageIdx: number): Promise<ClobTrade[]> => {
-      const offset = pageIdx * limit;
-      const ep = this.apiPool.pick('data-api');
-      const baseUrl = ep ? ep.url : this.dataApi;
-      const url = `${baseUrl}/trades?market=${conditionId}&limit=${limit}&offset=${offset}`;
+    const allTrades: ClobTrade[] = [];
+    let cursor: string | undefined;
+    let hardFailures = 0;
+    let firstError: unknown = null;
 
+    for (let pageIdx = 0; pageIdx < maxPages; pageIdx++) {
       if (ep) {
         await this.apiPool.waitForCapacity(ep);
       } else {
@@ -982,21 +965,25 @@ export class WhaleScanner {
       }
 
       const t0 = Date.now();
-      const res = await this.fetchWithRetry(url);
-      this.perfFetchCount++;
-      this.perfFetchLatencySum += Date.now() - t0;
-
-      if (res) {
+      let page: Awaited<ReturnType<typeof fetchV2TradesPage>>;
+      try {
+        page = await fetchV2TradesPage(baseUrl, { condition: conditionId, limit, cursor });
+        this.perfFetchCount++;
+        this.perfFetchLatencySum += Date.now() - t0;
         if (ep) this.apiPool.recordSuccess(ep);
-      } else {
+      } catch (err) {
+        this.perfFetchCount++;
+        this.perfFetchLatencySum += Date.now() - t0;
         if (ep) this.apiPool.recordFailure(ep);
-        return [];
+        hardFailures++;
+        if (firstError === null) firstError = err;
+        break;
       }
 
-      const raw: DataApiTrade[] = await res.json() as DataApiTrade[];
-      if (!Array.isArray(raw) || raw.length === 0) return [];
+      const raw = page.trades;
+      if (raw.length === 0) break;
 
-      return raw
+      allTrades.push(...raw
         .filter((t) => t.proxyWallet && t.side && t.size != null && t.price != null)
         .map((t) => ({
           id: t.transactionHash ?? '',
@@ -1010,28 +997,16 @@ export class WhaleScanner {
             : new Date().toISOString(),
           owner: t.proxyWallet ?? '',
           outcome: t.outcome,
-        }));
-    };
+        })));
 
-    /* Fire all pages concurrently */
-    const pagePromises = Array.from({ length: maxPages }, (_, i) => fetchPage(i));
-    const results = await Promise.allSettled(pagePromises);
-
-    const allTrades: ClobTrade[] = [];
-    let rejectedCount = 0;
-    let firstRejection: unknown = null;
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value.length > 0) {
-        allTrades.push(...r.value);
-      } else if (r.status === 'rejected') {
-        rejectedCount++;
-        if (!firstRejection) firstRejection = r.reason;
-      }
+      if (!page.hasMore || page.nextCursor === null) break;
+      cursor = page.nextCursor;
     }
 
-    /* If every single page rejected (not just empty), propagate the error */
-    if (rejectedCount === results.length && rejectedCount > 0) {
-      throw firstRejection instanceof Error ? firstRejection : new Error(String(firstRejection));
+    /* Every page hard-failed (not just empty) — propagate so the scan
+       cycle marks the error instead of silently reporting zero trades. */
+    if (hardFailures > 0 && allTrades.length === 0 && firstError !== null) {
+      throw firstError instanceof Error ? firstError : new Error(String(firstError));
     }
 
     this.perfTradesFetched += allTrades.length;
@@ -1528,36 +1503,27 @@ export class WhaleScanner {
 
     this.state.currentMarket = `Cross-referencing ${topProfiles.length} whales (parallel)…`;
 
-    interface DataApiTrade {
-      transactionHash?: string;
-      proxyWallet?: string;
-      side?: string;
-      size?: number | string;
-      price?: number | string;
-      timestamp?: number;
-      asset?: string;
-      outcome?: string;
-      conditionId?: string;
-    }
-
     const crossRefOne = async (profile: ScannedWhaleProfile): Promise<void> => {
       if (!this.state.enabled) return;
       await this.semaphore.acquire();
       try {
         const ep = this.apiPool.pick('data-api');
         const baseUrl = ep ? ep.url : this.dataApi;
-        const url = `${baseUrl}/trades?proxyWallet=${profile.address}&limit=1000`;
         if (ep) {
           await this.apiPool.waitForCapacity(ep);
         } else {
           await this.rateLimitWait();
         }
-        const res = await this.fetchWithRetry(url);
-        if (!res) { if (ep) this.apiPool.recordFailure(ep); return; }
-        if (ep) this.apiPool.recordSuccess(ep);
-
-        const raw: DataApiTrade[] = await res.json() as DataApiTrade[];
-        if (!Array.isArray(raw) || raw.length === 0) return;
+        let raw: LegacyDataApiTrade[];
+        try {
+          raw = await fetchAllV2Trades(baseUrl, { user: profile.address, limit: 500 }, { maxPages: 2 });
+          if (ep) this.apiPool.recordSuccess(ep);
+        } catch (err) {
+          if (ep) this.apiPool.recordFailure(ep);
+          logger.debug({ address: profile.address, err: (err as Error).message }, 'cross-ref v2 fetch failed');
+          return;
+        }
+        if (raw.length === 0) return;
 
         const marketTrades = new Map<string, ClobTrade[]>();
         for (const t of raw) {
@@ -1793,33 +1759,26 @@ export class WhaleScanner {
     const topN = markets.slice(0, cfg.topMarkets);
     let newBigTrades = 0;
 
-    interface DataApiTrade {
-      transactionHash?: string;
-      proxyWallet?: string;
-      side?: string;
-      size?: number | string;
-      price?: number | string;
-      timestamp?: number;
-      asset?: string;
-      outcome?: string;
-      conditionId?: string;
-    }
-
     /* Process all fast-scan markets concurrently */
     const scanOne = async (market: GammaMarket): Promise<number> => {
       await this.semaphore.acquire();
       try {
         const ep = this.apiPool.pick('data-api');
         const baseUrl = ep ? ep.url : this.dataApi;
-        const url = `${baseUrl}/trades?market=${market.conditionId}&limit=100&offset=0`;
         if (ep) await this.apiPool.waitForCapacity(ep);
         else await this.rateLimitWait();
-        const res = await this.fetchWithRetry(url);
-        if (!res) { if (ep) this.apiPool.recordFailure(ep); return 0; }
-        if (ep) this.apiPool.recordSuccess(ep);
 
-        const raw: DataApiTrade[] = await res.json() as DataApiTrade[];
-        if (!Array.isArray(raw)) return 0;
+        let raw: LegacyDataApiTrade[];
+        try {
+          const page = await fetchV2TradesPage(baseUrl, { condition: market.conditionId, limit: 100 });
+          if (ep) this.apiPool.recordSuccess(ep);
+          raw = page.trades;
+        } catch (err) {
+          if (ep) this.apiPool.recordFailure(ep);
+          logger.debug({ market: market.conditionId, err: (err as Error).message }, 'fast-scan v2 fetch failed');
+          return 0;
+        }
+        if (raw.length === 0) return 0;
 
         let bigTradesFound = 0;
         for (const t of raw) {
@@ -1897,12 +1856,6 @@ export class WhaleScanner {
     const topMarkets = markets.slice(0, Math.min(20, markets.length));
     this.hotMarkets = topMarkets;
 
-    interface DataApiTrade {
-      transactionHash?: string; proxyWallet?: string; side?: string;
-      size?: number | string; price?: number | string; timestamp?: number;
-      asset?: string; outcome?: string; conditionId?: string;
-    }
-
     /* Backfill markets concurrently using semaphore */
     let backfillCompleted = 0;
     const backfillOne = async (market: GammaMarket): Promise<void> => {
@@ -1912,27 +1865,42 @@ export class WhaleScanner {
         const limit = this.scannerConfig.tradesPerMarket;
         const cutoff = Date.now() - days * 86_400_000;
 
-        /* Fetch up to 10 pages concurrently per market */
-        const fetchPage = async (page: number): Promise<ClobTrade[]> => {
-          const offset = page * limit;
-          const tep = this.apiPool.pick('data-api');
-          const tUrl = `${tep ? tep.url : this.dataApi}/trades?market=${market.conditionId}&limit=${limit}&offset=${offset}`;
+        /* v2 Data API is cursor-paginated (no offset param) — walk the
+           cursor chain sequentially per market; markets still scan in
+           parallel through the semaphore. */
+        const tep = this.apiPool.pick('data-api');
+        const tBase = tep ? tep.url : this.dataApi;
+
+        const allMapped: ClobTrade[] = [];
+        let cursor: string | undefined;
+        for (let pageNum = 0; pageNum < 10; pageNum++) {
           if (tep) await this.apiPool.waitForCapacity(tep);
           else await this.rateLimitWait();
-          const tRes = await this.fetchWithRetry(tUrl);
-          if (!tRes) { if (tep) this.apiPool.recordFailure(tep); return []; }
-          if (tep) this.apiPool.recordSuccess(tep);
 
-          const raw: DataApiTrade[] = await tRes.json() as DataApiTrade[];
-          if (!Array.isArray(raw) || raw.length === 0) return [];
+          let pageRes: Awaited<ReturnType<typeof fetchV2TradesPage>>;
+          try {
+            pageRes = await fetchV2TradesPage(tBase, { condition: market.conditionId, limit, cursor });
+            if (tep) this.apiPool.recordSuccess(tep);
+          } catch (err) {
+            if (tep) this.apiPool.recordFailure(tep);
+            if (pageNum === 0) {
+              logger.debug({ market: market.conditionId, err: (err as Error).message }, 'backfill v2 fetch failed');
+            }
+            break;
+          }
+
+          const raw = pageRes.trades;
+          if (raw.length === 0) break;
 
           const recent = raw.filter((t) => {
             const ts = t.timestamp ? t.timestamp * 1000 : 0;
             return ts >= cutoff;
           });
-          if (recent.length === 0) return [];
+          /* Newest-first feed: once a page has nothing recent, older
+             pages cannot help either. */
+          if (recent.length === 0) break;
 
-          return recent
+          allMapped.push(...recent
             .filter((t) => t.proxyWallet && t.side && t.size != null && t.price != null)
             .map((t) => ({
               id: t.transactionHash ?? '',
@@ -1944,19 +1912,15 @@ export class WhaleScanner {
               match_time: t.timestamp ? new Date(t.timestamp * 1000).toISOString() : new Date().toISOString(),
               owner: t.proxyWallet ?? '',
               outcome: t.outcome,
-            }));
-        };
+            })));
 
-        /* Fire all 10 pages concurrently */
-        const pageResults = await Promise.allSettled(
-          Array.from({ length: 10 }, (_, i) => fetchPage(i)),
-        );
+          if (!pageRes.hasMore || pageRes.nextCursor === null) break;
+          cursor = pageRes.nextCursor;
+        }
 
         const currentPrices = this.buildCurrentPriceMap(market);
-        for (const r of pageResults) {
-          if (r.status === 'fulfilled' && r.value.length > 0) {
-            this.aggregateTrades(this.globalAgg, r.value, market.conditionId, market.question, currentPrices);
-          }
+        if (allMapped.length > 0) {
+          this.aggregateTrades(this.globalAgg, allMapped, market.conditionId, market.question, currentPrices);
         }
 
         /* ── Live backfill progress ── */

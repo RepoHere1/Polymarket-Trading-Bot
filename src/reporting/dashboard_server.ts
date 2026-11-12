@@ -1021,10 +1021,20 @@ export class DashboardServer {
       const capital = Number(body.capital ?? 0);
       const mode = String(body.mode ?? 'PAPER').toUpperCase();
 
-      if (!walletId || !strategy || capital <= 0) {
+      /* NaN capital (e.g. "1,000") must be rejected too: NaN <= 0 is false,
+         so a bare `capital <= 0` check would silently let it through. */
+      if (!walletId || !strategy || !Number.isFinite(capital) || capital <= 0) {
+        const problems: string[] = [];
+        if (!walletId) problems.push('walletId (string)');
+        if (!strategy) problems.push('strategy (string)');
+        if (!Number.isFinite(capital) || capital <= 0) problems.push('capital (number > 0)');
         json(res, 400, {
           ok: false,
-          error: 'walletId (string), strategy (string), and capital (>0) are required',
+          error:
+            `Invalid create-wallet request — missing or invalid: ${problems.join(', ')}. ` +
+            'If the form looks correctly filled in, hard-refresh the page (Ctrl+F5): a stale cached ' +
+            'dashboard can still submit an outdated payload.',
+          received: { walletId: walletId || null, strategy: strategy || null, capital: body.capital ?? null, mode },
         });
         return;
       }

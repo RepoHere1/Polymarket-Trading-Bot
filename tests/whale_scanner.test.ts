@@ -49,7 +49,12 @@ function gammaMarkets(count = 3) {
   }));
 }
 
-/* ── Fake data-api trades for a market (matches data-api.polymarket.com shape) ── */
+/* ── v2 Data API envelope (verified live 2026-11-11: { data, pagination }) ── */
+function v2Page(rows: unknown[]): { data: unknown[]; pagination: { next_cursor: string | null; has_more: boolean } } {
+  return { data: rows, pagination: { next_cursor: null, has_more: false } };
+}
+
+/* ── Fake data-api trades for a market (matches /v2/trades row shape) ── */
 function clobTrades(marketId: string, addressCount = 5, tradesPerAddr = 10) {
   const trades: unknown[] = [];
   const baseTimeSec = Math.floor((Date.now() - 3_600_000) / 1000); // 1 hour ago, epoch seconds
@@ -60,15 +65,16 @@ function clobTrades(marketId: string, addressCount = 5, tradesPerAddr = 10) {
       const price = 0.55 + Math.random() * 0.25;
       const size = 50 + Math.random() * 200;
       trades.push({
-        transactionHash: `0xtx_${marketId}_${a}_${t}`,
-        proxyWallet: addr,
-        asset: `tok_${marketId}_yes`,
+        transaction_hash: `0xtx_${marketId}_${a}_${t}`,
+        proxy_wallet: addr,
+        token_id: `tok_${marketId}_yes`,
         side: isBuy ? 'BUY' : 'SELL',
         size,
         price,
         timestamp: baseTimeSec + t * 60,
         outcome: 'Yes',
-        conditionId: `0xcond_${marketId}`,
+        outcome_index: 0,
+        condition_id: `0xcond_${marketId}`,
       });
     }
   }
@@ -173,11 +179,11 @@ describe('WhaleScanner — triggerScan (with mock fetch)', () => {
       if (url.includes('/markets')) {
         return { ok: true, json: () => Promise.resolve(markets) };
       }
-      if (url.includes('market=0xcond_market_0')) {
-        return { ok: true, json: () => Promise.resolve(trades0) };
+      if (url.includes('condition=0xcond_market_0')) {
+        return { ok: true, json: () => Promise.resolve(v2Page(trades0)) };
       }
-      if (url.includes('market=0xcond_market_1')) {
-        return { ok: true, json: () => Promise.resolve(trades1) };
+      if (url.includes('condition=0xcond_market_1')) {
+        return { ok: true, json: () => Promise.resolve(v2Page(trades1)) };
       }
       return { ok: true, json: () => Promise.resolve([]) };
     }));
@@ -279,7 +285,7 @@ describe('WhaleScanner — triggerScan (with mock fetch)', () => {
       if (url.includes('/markets')) {
         return { ok: true, json: () => Promise.resolve(markets) };
       }
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -296,21 +302,21 @@ describe('WhaleScanner — triggerScan (with mock fetch)', () => {
   });
 });
 
-/* ── Helper: build a single data-api-style trade ── */
+/* ── Helper: build a single v2 data-api-style trade ── */
 function trade(overrides: {
   id?: string; market?: string; side?: string; size?: number; price?: number;
   timestamp?: number; owner?: string; outcome?: string;
 } = {}): Record<string, unknown> {
   return {
-    transactionHash: overrides.id ?? `0xtx_${Math.random().toString(36).slice(2)}`,
-    proxyWallet: overrides.owner ?? `0x${'abcd'.repeat(10)}`,
-    asset: `tok_${overrides.market ?? 'market_0'}_yes`,
+    transaction_hash: overrides.id ?? `0xtx_${Math.random().toString(36).slice(2)}`,
+    proxy_wallet: overrides.owner ?? `0x${'abcd'.repeat(10)}`,
+    token_id: `tok_${overrides.market ?? 'market_0'}_yes`,
     side: overrides.side ?? 'BUY',
     size: overrides.size ?? 100,
     price: overrides.price ?? 0.60,
     timestamp: overrides.timestamp ?? Math.floor(Date.now() / 1000),
     outcome: overrides.outcome ?? 'Yes',
-    conditionId: `0xcond_${overrides.market ?? 'market_0'}`,
+    condition_id: `0xcond_${overrides.market ?? 'market_0'}`,
   };
 }
 
@@ -329,7 +335,7 @@ describe('WhaleScanner — Profile fields', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -356,8 +362,8 @@ describe('WhaleScanner — Profile fields', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      if (url.includes('market=0xcond_market_0')) return { ok: true, json: () => Promise.resolve(trades0) };
-      if (url.includes('market=0xcond_market_1')) return { ok: true, json: () => Promise.resolve(trades1) };
+      if (url.includes('condition=0xcond_market_0')) return { ok: true, json: () => Promise.resolve(v2Page(trades0)) };
+      if (url.includes('condition=0xcond_market_1')) return { ok: true, json: () => Promise.resolve(v2Page(trades1)) };
       return { ok: true, json: () => Promise.resolve([]) };
     }));
 
@@ -393,7 +399,7 @@ describe('WhaleScanner — Profile fields', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -424,7 +430,7 @@ describe('WhaleScanner — Auto-promote', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({
@@ -459,7 +465,7 @@ describe('WhaleScanner — Auto-promote', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({
@@ -494,7 +500,7 @@ describe('WhaleScanner — Auto-promote', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({
@@ -532,7 +538,7 @@ describe('WhaleScanner — FIFO PnL estimation', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -560,7 +566,7 @@ describe('WhaleScanner — FIFO PnL estimation', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -587,7 +593,7 @@ describe('WhaleScanner — getProfile', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -627,7 +633,7 @@ describe('WhaleScanner — getProfile', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -661,7 +667,7 @@ describe('WhaleScanner — Enriched profile fields', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      return { ok: true, json: () => Promise.resolve(trades) };
+      return { ok: true, json: () => Promise.resolve(v2Page(trades)) };
     }));
 
     const config = makeConfig({ minAddressVolumeUsd: 0, minAddressTrades: 1 });
@@ -721,8 +727,8 @@ describe('WhaleScanner — State enrichment', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
       if (url.includes('/markets')) return { ok: true, json: () => Promise.resolve(markets) };
-      if (url.includes('market=0xcond_market_0')) return { ok: true, json: () => Promise.resolve(trades0) };
-      if (url.includes('market=0xcond_market_1')) return { ok: true, json: () => Promise.resolve(trades1) };
+      if (url.includes('condition=0xcond_market_0')) return { ok: true, json: () => Promise.resolve(v2Page(trades0)) };
+      if (url.includes('condition=0xcond_market_1')) return { ok: true, json: () => Promise.resolve(v2Page(trades1)) };
       return { ok: true, json: () => Promise.resolve([]) };
     }));
 

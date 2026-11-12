@@ -13,6 +13,7 @@ import { WhaleCandidates } from './whale_candidates';
 import { ShadowPortfolioManager } from './shadow_portfolio';
 import { WhaleReconciliation } from './whale_reconciliation';
 import { WhaleScanner } from './whale_scanner';
+import { PolywhalerSeeder } from './polywhaler_seeder';
 import type {
   WhaleTrackingConfig, Whale, WhaleTrade, WhalePosition,
   WhaleScoreBreakdown, TimingWindow, WhaleCandidate,
@@ -33,6 +34,7 @@ export class WhaleService {
   private shadow!: ShadowPortfolioManager;
   private reconciliation!: WhaleReconciliation;
   private scanner!: WhaleScanner;
+  private polywhalerSeeder: PolywhalerSeeder | null = null;
   private config: WhaleTrackingConfig;
   private clobApi: string;
   private gammaApi: string;
@@ -73,6 +75,14 @@ export class WhaleService {
       this.scanner.start();
     }
 
+    // Seed tracked whales from polywhaler.com's public leaderboard API
+    // (full 0x addresses + smart-money scores) — feeds the tracker→
+    // copy_trade bridge so copy lanes follow REAL proven whales.
+    if (this.config.polywhalerSeed?.enabled) {
+      this.polywhalerSeeder = new PolywhalerSeeder(this.db, this.config.polywhalerSeed);
+      this.polywhalerSeeder.start();
+    }
+
     // Analytics refresh every 5 minutes
     this.analyticsTimer = setInterval(() => {
       void this.refreshAllAnalytics();
@@ -87,6 +97,7 @@ export class WhaleService {
     this.candidates?.stop();
     this.reconciliation?.stop();
     this.scanner?.stop();
+    this.polywhalerSeeder?.stop();
     if (this.analyticsTimer) { clearInterval(this.analyticsTimer); this.analyticsTimer = null; }
     this.db?.close();
     logger.info('WhaleService stopped');

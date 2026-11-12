@@ -68,7 +68,8 @@ describe('syncTrackedWhalesIntoCopyTrade — whale tracker → copy bridge', () 
   });
 });
 
-/** Build a mock data-api response for whale trades */
+/** Build a mock data-api v2 response for whale trades — { data, pagination }
+ *  envelope with snake_case rows, the shape verified live 2026-11-11. */
 function mkApiTrades(trades: Array<{
   hash?: string;
   wallet?: string;
@@ -78,18 +79,19 @@ function mkApiTrades(trades: Array<{
   timestamp?: number;
   conditionId?: string;
   outcome?: string;
-}>): object[] {
-  return trades.map((t) => ({
-    transactionHash: t.hash ?? `0x${Math.random().toString(16).slice(2, 18)}`,
-    proxyWallet: t.wallet ?? WHALE_A,
+}>): { data: unknown[]; pagination: { next_cursor: string | null; has_more: boolean } } {
+  const rows = trades.map((t) => ({
+    transaction_hash: t.hash ?? `0x${Math.random().toString(16).slice(2, 18)}`,
+    proxy_wallet: t.wallet ?? WHALE_A,
     side: t.side ?? 'BUY',
     size: t.size ?? 100,
     price: t.price ?? 0.60,
     timestamp: t.timestamp ?? Math.floor(Date.now() / 1000),
-    conditionId: t.conditionId ?? 'mkt-1',
+    condition_id: t.conditionId ?? 'mkt-1',
     outcome: t.outcome ?? 'Yes',
-    asset: t.conditionId ?? 'mkt-1',
+    token_id: t.conditionId ?? 'mkt-1',
   }));
+  return { data: rows, pagination: { next_cursor: null, has_more: false } };
 }
 
 function createStrategy(cfgOverrides: Partial<CopyTradeConfig> = {}): CopyTradeStrategy {
@@ -185,7 +187,7 @@ describe('CopyTradeStrategy — Polling', () => {
 
     await s.onTimer();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toContain(`maker_address=${WHALE_A}`);
+    expect(fetchMock.mock.calls[0][0]).toContain(`user=${WHALE_A}`);
   });
 
   it('does not poll before interval elapses', async () => {

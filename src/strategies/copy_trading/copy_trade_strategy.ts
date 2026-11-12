@@ -20,6 +20,7 @@ import { BaseStrategy, StrategyContext } from '../strategy_interface';
 import { Signal, OrderRequest, OrderOutcome, OrderSide } from '../../types';
 import { logger } from '../../reporting/logs';
 import { consoleLog } from '../../reporting/console_log';
+import { fetchV2TradesPage, type LegacyDataApiTrade } from '../../data/polymarket_data_api';
 
 /* ━━━━━━━━━━━━━━ Configuration Interface ━━━━━━━━━━━━━━ */
 
@@ -132,18 +133,8 @@ export const DEFAULT_COPY_TRADE_CONFIG: CopyTradeConfig = {
 
 /* ━━━━━━━━━━━━━━ Internal Types ━━━━━━━━━━━━━━ */
 
-/** Raw trade shape from Polymarket data API */
-interface DataApiTrade {
-  transactionHash?: string;
-  proxyWallet?: string;
-  side?: string;
-  size?: number | string;
-  price?: number | string;
-  timestamp?: number;
-  asset?: string;
-  outcome?: string;
-  conditionId?: string;
-}
+/* Raw trades arrive as LegacyDataApiTrade from the v2 Data API client
+   (src/data/polymarket_data_api.ts) — the legacy v1 surface is retired. */
 
 /** A whale trade after normalisation */
 interface NormalisedWhaleTrade {
@@ -511,38 +502,36 @@ export class CopyTradeStrategy extends BaseStrategy {
 
   /* ━━━━━━━━━━━━━━ Data API Polling ━━━━━━━━━━━━━━ */
 
-  /** Fetch recent trades for a whale address from the Polymarket data API */
+  /** Fetch recent trades for a whale address from the Polymarket Data API v2
+   *  (public, no auth — the legacy v1 /trades surface is 410-gone and the
+   *  CLOB /trades endpoint requires L2 auth). */
   private async fetchWhaleTrades(address: string): Promise<NormalisedWhaleTrade[]> {
     try {
-      const url = `${this.cfg.data_api_url}/trades?maker_address=${encodeURIComponent(address)}&limit=50`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        logger.debug({ address, status: res.status }, '[copy_trade] API request failed');
-        return [];
-      }
+      const page = await fetchV2TradesPage(this.cfg.data_api_url, {
+        user: address.toLowerCase(),
+        limit: 50,
+      });
 
-      const raw = (await res.json()) as DataApiTrade[] | { trades?: DataApiTrade[] };
-      const trades: DataApiTrade[] = Array.isArray(raw) ? raw : (raw.trades ?? []);
-
-      return trades
-        .filter((t) => t.proxyWallet && t.side && t.size != null && t.price != null)
+      return page.trades
+        .filter((t) => t.proxyWallet && t.side && t.size > 0 && t.price > 0)
         .map((t) => this.normaliseTrade(t, address));
-    } catch {
+    } catch (err) {
+      logger.debug({ address, err: (err as Error).message }, '[copy_trade] v2 trades fetch failed');
       return [];
     }
   }
 
-  private normaliseTrade(raw: DataApiTrade, whaleAddress: string): NormalisedWhaleTrade {
-    const price = Number(raw.price ?? 0);
-    const size = Number(raw.size ?? 0);
-    const side = (raw.side?.toUpperCase() === 'SELL' ? 'SELL' : 'BUY') as OrderSide;
-    const outcome = (raw.outcome?.toUpperCase() === 'NO' ? 'NO' : 'YES') as OrderOutcome;
+  private normaliseTrade(raw: LegacyDataApiTrade, whaleAddress: string): NormalisedWhaleTrade {
+    const price = raw.price;
+    const size = raw.size;
+    const side = (raw.side === 'SELL' ? 'SELL' : 'BUY') as OrderSide;
+    const outcome = (raw.outcome.toUpperCase() === 'NO' ? 'NO' : 'YES') as OrderOutcome;
     const timestamp = raw.timestamp ? raw.timestamp * 1000 : Date.now();
 
     return {
-      id: raw.transactionHash ?? `${whaleAddress}-${timestamp}-${raw.asset ?? ''}`,
+      id: raw.transactionHash || `${whaleAddress}-${timestamp}-${raw.asset}`,
       whaleAddress: whaleAddress.toLowerCase(),
-      marketId: raw.conditionId ?? raw.asset ?? '',
+      marketId: raw.conditionId || raw.asset,
       outcome,
       side,
       price,

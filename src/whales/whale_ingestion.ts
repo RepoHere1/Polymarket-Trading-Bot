@@ -7,6 +7,7 @@
 import { logger } from '../reporting/logs';
 import type { WhaleDB } from './whale_db';
 import type { WhaleTrade, WhaleTrackingConfig, AggressorSide } from './whale_types';
+import { fetchV2TradesPage, DataApiError, type LegacyDataApiTrade } from '../data/polymarket_data_api';
 
 /** Shape of a single trade from CLOB /trades endpoint */
 interface ClobTrade {
@@ -41,6 +42,7 @@ export class WhaleIngestion {
   private db: WhaleDB;
   private clobApi: string;
   private gammaApi: string;
+  private dataApi: string;
   private config: WhaleTrackingConfig;
   private running = false;
   private isPolling = false;
@@ -51,11 +53,18 @@ export class WhaleIngestion {
   private marketMetadataCache: Map<string, { question: string; slug: string; outcomes: string[] }> = new Map();
   private metadataCacheLoadedAt = 0;
 
-  constructor(db: WhaleDB, config: WhaleTrackingConfig, clobApi: string, gammaApi: string) {
+  constructor(
+    db: WhaleDB,
+    config: WhaleTrackingConfig,
+    clobApi: string,
+    gammaApi: string,
+    dataApi = 'https://data-api.polymarket.com',
+  ) {
     this.db = db;
     this.config = config;
     this.clobApi = clobApi;
     this.gammaApi = gammaApi;
+    this.dataApi = dataApi;
   }
 
   /* ━━━━━━━━━━━━━━ Lifecycle ━━━━━━━━━━━━━━ */
@@ -269,21 +278,65 @@ export class WhaleIngestion {
     return totalInserted;
   }
 
-  /* ━━━━━━━━━━━━━━ CLOB API helpers ━━━━━━━━━━━━━━ */
+  /* ━━━━━━━━━━━━━━ Data API v2 helpers ━━━━━━━━━━━━━━ */
 
+  /**
+   * Fetch a whale's trades from the PUBLIC Data API v2 (`/v2/trades?user=`).
+   * The CLOB /trades endpoint requires L2 auth (was 401 on every call —
+   * the source of the old "CLOB request failed" storm) and the legacy v1
+   * data-api surface is 410-gone; v2 is the verified public replacement.
+   * `after` is accepted for signature compatibility: only opaque v2
+   * cursors (base64 JSON starting "eyJ") are forwarded — legacy ISO
+   * timestamps from the retired pipeline are ignored so v2 never 400s.
+   */
   private async fetchTradesFromClob(
     address: string,
     after?: string,
     limit = 100,
   ): Promise<ClobTrade[]> {
-    let url = `${this.clobApi}/trades?maker_address=${address}&limit=${limit}`;
-    if (after) url += `&after=${encodeURIComponent(after)}`;
+    const cursor = after && after.startsWith('eyJ') ? after : undefined;
 
     this.recordRequest();
-    const res = await this.fetchWithRetry(url);
-    if (!res) return [];
-    const data = await res.json() as ClobTrade[] | { trades?: ClobTrade[] };
-    return Array.isArray(data) ? data : (data.trades ?? []);
+    let page: Awaited<ReturnType<typeof fetchV2TradesPage>>;
+    try {
+      page = await fetchV2TradesPage(this.dataApi, { user: address.toLowerCase(), limit, cursor });
+    } catch (err) {
+      logger.error(
+        {
+          status: err instanceof DataApiError ? err.status : 0,
+          err: (err as Error).message,
+          url: 'v2/trades?user=REDACTED',
+        },
+        'Data API v2 request failed',
+      );
+      return [];
+    }
+    return page.trades.map((t) => WhaleIngestion.toClobTrade(t));
+  }
+
+  /** Map a v2/legacy trade row onto the ClobTrade shape the pipeline consumes. */
+  private static toClobTrade(t: LegacyDataApiTrade): ClobTrade {
+    /* v2 exposes transaction_hash, which is NOT unique per fill (one tx can
+       carry several fills) — key on hash+asset+size so each fill is stored. */
+    const id = t.transactionHash
+      ? `${t.transactionHash}:${t.asset}:${t.size}`
+      : `${t.proxyWallet}:${t.timestamp}:${t.asset}`;
+    return {
+      id,
+      taker_order_id: '',
+      market: t.conditionId,
+      asset_id: t.asset,
+      side: t.side,
+      size: String(t.size),
+      fee_rate_bps: '0',
+      price: String(t.price),
+      status: 'matched',
+      match_time: t.timestamp ? new Date(t.timestamp * 1000).toISOString() : new Date().toISOString(),
+      owner: t.proxyWallet,
+      maker_address: t.proxyWallet,
+      outcome: t.outcome,
+      type: 'v2',
+    };
   }
 
   private async fetchOrderbook(tokenId: string): Promise<OrderbookSnapshot | null> {

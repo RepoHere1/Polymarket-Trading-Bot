@@ -1,5 +1,6 @@
-import { BaseStrategy } from '../strategy_interface';
+import { BaseStrategy, StrategyContext } from '../strategy_interface';
 import { Signal, MarketData, OrderRequest } from '../../types';
+import { logger } from '../../reporting/logs';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Mispricing Arbitrage Strategy – Enhanced
@@ -75,6 +76,39 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
     this.volumeHistory.set(data.marketId, vols);
   }
 
+  /* ── Lifecycle ──────────────────────────────────────────────── */
+
+  /**
+   * ADOPT ORPHANS 2026-11-11: `this.positions` used to be in-memory only,
+   * so every restart orphaned the wallet's open positions — managePositions
+   * could never exit them again and the wallet accumulated dead dust
+   * (PolyFake-02 held 10 sub-5-cent positions with realizedPnl 0). On
+   * initialize we adopt whatever the wallet still holds; TIME_EXIT (15 min)
+   * then drains anything stale.
+   */
+  override initialize(context: StrategyContext): void {
+    super.initialize(context);
+    const orphans = context.wallet.openPositions ?? [];
+    for (const pos of orphans) {
+      this.positions.push({
+        marketId: pos.marketId,
+        outcome: pos.outcome,
+        side: 'BUY', // paper positions open via BUY fills
+        entryPrice: pos.avgPrice,
+        size: pos.size,
+        entryTime: Date.now(),
+        mispricingScore: 0,
+        peakBps: 0,
+      });
+    }
+    if (orphans.length > 0) {
+      logger.info(
+        { strategy: this.name, adopted: orphans.length },
+        'Adopted open wallet positions on restart — exit management resumes',
+      );
+    }
+  }
+
   /* ── Signal generation ──────────────────────────────────────── */
   generateSignals(): Signal[] {
     const signals: Signal[] = [];
@@ -89,38 +123,30 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
       const score = this.computeMispricingScore(marketId, market, eventGroups);
       if (score.total < 0.3) continue; // Not enough mispricing evidence
 
+      /* VWAP-deviation entries ONLY (2026-11-11 fix).
+         The old "spread fallback" bought whichever side was <0.5 whenever
+         VWAP wasn't ready — a phantom edge that mostly bought illiquid
+         longshots. Real spread capture needs passive limit fills the paper
+         executor doesn't model, so we only trade a measured deviation from
+         OUR OWN volume-weighted price history, at a size that matters. */
       const snaps = this.priceSnapshots.get(marketId) ?? [];
       const vwap = this.computeVWAP(snaps);
       const yesPrice = market.outcomePrices[0];
 
-      // Determine trade direction based on fair value estimate
+      if (vwap <= 0 || Math.abs(yesPrice - vwap) < 0.01) continue; // need ≥1 cent of real deviation
+
       let direction: 'YES' | 'NO';
       let side: 'BUY' | 'SELL';
       let edge: number;
 
-      if (vwap > 0 && Math.abs(yesPrice - vwap) > 0.005) {
-        // Price deviates from VWAP: trade toward VWAP
-        if (yesPrice < vwap) {
-          direction = 'YES';
-          side = 'BUY';
-          edge = vwap - yesPrice; // full deviation — no halving
-        } else {
-          direction = 'NO';
-          side = 'BUY';
-          edge = yesPrice - vwap;
-        }
+      if (yesPrice < vwap) {
+        direction = 'YES';
+        side = 'BUY';
+        edge = vwap - yesPrice;
       } else {
-        // Spread-based: buy at bid when spread is wide
-        const spreadEdge = market.spread * 0.4; // capture 40% of spread
-        if (yesPrice < 0.5) {
-          direction = 'YES';
-          side = 'BUY';
-          edge = spreadEdge;
-        } else {
-          direction = 'NO';
-          side = 'BUY';
-          edge = spreadEdge;
-        }
+        direction = 'NO';
+        side = 'BUY';
+        edge = yesPrice - vwap;
       }
 
       // Boost edge with volume-price divergence
@@ -158,12 +184,35 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         return now - last > this.cooldownMs;
       })
       .map((signal) => {
-        // Arm the per-market cooldown when the order is sized so a
-        // risk-rejected or unfilled attempt is not retried every scan.
+        const market = this.markets.get(signal.marketId);
+
+        /* REAL BOOK REQUIRED (2026-11-11 fix): no fabricated fallback
+           prices (the old `?? midPrice * 0.98` invented quotes for markets
+           without books). bid/ask belong to the YES token — sanity-check
+           them against the mid so an anomalous book can't produce a
+           $0.002 "fill", and price the NO outcome as the complement of
+           the YES book (the old code bought NO at the YES bid — garbage
+           fills). */
+        if (!market || !(market.bid > 0) || !(market.ask < 1) || market.ask <= market.bid) return null;
+        const mid = market.midPrice > 0 ? market.midPrice : (market.bid + market.ask) / 2;
+        if (market.bid < mid * 0.8 || market.ask > mid * 1.2) return null; // anomalous book
+        if (market.spread > 0.05) return null; // exit slippage exceeds captured edge
+
+        let price: number;
+        if (signal.outcome === 'YES') {
+          price = signal.side === 'BUY' ? market.bid : market.ask;
+        } else {
+          /* NO token book is the complement of the YES book */
+          price = signal.side === 'BUY' ? 1 - market.ask : 1 - market.bid;
+        }
+        price = Number(price.toFixed(4));
+        if (price < 0.02 || price > 0.98) return null; // never trade dust
+
+        // Arm the per-market cooldown only when an order is actually
+        // produced — skipped markets stay eligible next scan.
         this.tradeCooldowns.set(`${signal.marketId}:${signal.outcome}:${signal.side}`, now);
 
-        const market = this.markets.get(signal.marketId);
-        const liquidity = market?.liquidity ?? 500;
+        const liquidity = market.liquidity;
 
         // Half-Kelly sizing
         const winProb = 0.5 + signal.edge;
@@ -172,17 +221,6 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         const maxFromCapital = capital * Math.min(kellyFrac, 0.05);
         const maxFromLiquidity = liquidity * 0.008;
         const size = Math.max(1, Math.floor(Math.min(maxFromCapital, maxFromLiquidity, 50)));
-
-        // Use actual bid/ask for realistic pricing
-        let price: number;
-        if (signal.side === 'BUY') {
-          // Buy at the bid (limit order) — realistic execution
-          price = market?.bid ?? (market?.outcomePrices[0] ?? 0.5) * 0.98;
-        } else {
-          // Sell at the ask
-          price = market?.ask ?? (market?.outcomePrices[0] ?? 0.5) * 1.02;
-        }
-        price = Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4));
 
         return {
           walletId,
@@ -193,7 +231,8 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
           size,
           strategy: this.name,
         };
-      });
+      })
+      .filter((o): o is OrderRequest => o !== null);
   }
 
   /* ── Position tracking via engine callback ──────────────────── */
@@ -391,6 +430,14 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
     const yesPrice = market.outcomePrices[0] ?? 0.5;
     if (yesPrice < 0.05 || yesPrice > 0.95) return false;
+    const noPrice = market.outcomePrices[1];
+    if (noPrice !== undefined && (noPrice < 0.05 || noPrice > 0.95)) return false;
+
+    /* Real two-sided book (2026-11-11): crossed/one-sided books produce
+       phantom mispricings, and wide spreads make the exit cost exceed the
+       captured edge. */
+    if (!(market.bid > 0) || !(market.ask < 1) || market.ask <= market.bid) return false;
+    if (market.spread > 0.05) return false;
 
     const spreadPct = market.spread / Math.max(market.midPrice, 0.01);
     if (spreadPct < MIN_SPREAD_PCT) return false;

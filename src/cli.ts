@@ -146,11 +146,15 @@ function buildWhaleConfig(raw: Record<string, unknown>): WhaleTrackingConfig {
   const scoreWeightsRaw = (camelRaw.scoreWeights ?? {}) as Record<string, unknown>;
   delete camelRaw.scoreWeights;
 
+  const polywhalerRaw = (camelRaw.polywhalerSeed ?? {}) as Record<string, unknown>;
+  delete camelRaw.polywhalerSeed;
+
   return {
     ...DEFAULT_WHALE_CONFIG,
     ...camelRaw,
     scoreWeights: { ...DEFAULT_WHALE_CONFIG.scoreWeights, ...scoreWeightsRaw },
     copy: { ...DEFAULT_WHALE_CONFIG.copy, ...copyRaw },
+    polywhalerSeed: { ...DEFAULT_WHALE_CONFIG.polywhalerSeed, ...polywhalerRaw },
     scanner: normaliseScannerConfig(scannerRaw),
   } as WhaleTrackingConfig;
 }

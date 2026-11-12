@@ -745,6 +745,44 @@ export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
   exchangeSources: [...DEFAULT_EXCHANGE_SOURCES],
 };
 
+/* ── Polywhaler leaderboard seeding ── */
+
+/**
+ * Seeds the whale tracker from polywhaler.com's PUBLIC leaderboard API
+ * (verified 2026-11-11: https://polywhaler.com/api/leaderboard?page=N
+ * returns full wallet addresses + smartMoneyScore / winRate / P&L with no
+ * auth). Seeded whales land in whales.db with tracking_enabled=1, so the
+ * existing 60-second tracker→copy_trade bridge picks them up automatically.
+ */
+export interface PolywhalerSeedConfig {
+  enabled: boolean;
+  /** Leaderboard pages to fetch (50 entries per page). */
+  pages: number;
+  /** Minimum smart-money score (0-100) to qualify. */
+  minScore: number;
+  /** Minimum win rate (%) to qualify. */
+  minWinRate: number;
+  /** Minimum lifetime trades to qualify. */
+  minTrades: number;
+  /** Maximum whales to seed per refresh (best scores first). */
+  topK: number;
+  /** Skip confirmed-insider accounts (their fills risk voiding). */
+  skipConfirmedInsiders: boolean;
+  /** How often to re-check the leaderboard (hours). */
+  refreshHours: number;
+}
+
+export const DEFAULT_POLYWHALE_SEED: PolywhalerSeedConfig = {
+  enabled: true,
+  pages: 3,
+  minScore: 70,
+  minWinRate: 55,
+  minTrades: 30,
+  topK: 25,
+  skipConfirmedInsiders: true,
+  refreshHours: 12,
+};
+
 /* ── Configuration ── */
 
 export interface WhaleTrackingConfig {
@@ -799,6 +837,8 @@ export interface WhaleTrackingConfig {
   reconcileLookbackDays: number;
   /* ── Metadata cache ── */
   metadataCacheTtlMs: number;
+  /* ── Polywhaler leaderboard seeding ── */
+  polywhalerSeed: PolywhalerSeedConfig;
   /* ── Webhook (optional) ── */
   telegramWebhookUrl: string | null;
   /* ── Market Scanner ── */
@@ -849,6 +889,7 @@ export const DEFAULT_WHALE_CONFIG: WhaleTrackingConfig = {
   reconcileIntervalMs: 86_400_000,
   reconcileLookbackDays: 7,
   metadataCacheTtlMs: 3_600_000,
+  polywhalerSeed: { ...DEFAULT_POLYWHALE_SEED },
   telegramWebhookUrl: null,
   scanner: { ...DEFAULT_SCANNER_CONFIG },
 };

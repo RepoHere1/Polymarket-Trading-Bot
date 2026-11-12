@@ -7,6 +7,7 @@
 import { logger } from '../reporting/logs';
 import type { WhaleDB } from './whale_db';
 import type { WhaleTrackingConfig } from './whale_types';
+import { fetchV2TradesPage } from '../data/polymarket_data_api';
 
 interface ClobTradeScan {
   id: string;
@@ -115,21 +116,8 @@ export class WhaleCandidates {
   /* ━━━━━━━━━━━━━━ Fetch recent trades ━━━━━━━━━━━━━━ */
 
   private async fetchRecentTrades(): Promise<ClobTradeScan[]> {
-    /* Primary: CLOB API */
-    try {
-      const url = `${this.clobApi}/trades?limit=500`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json() as ClobTradeScan[] | { trades?: ClobTradeScan[] };
-        return Array.isArray(data) ? data : (data.trades ?? []);
-      }
-      /* CLOB auth failed (401) or other error — fall through to data-api */
-      logger.debug({ status: res.status }, 'CLOB trades unavailable, falling back to data-api');
-    } catch {
-      logger.debug('CLOB trades fetch error, falling back to data-api');
-    }
-
-    /* Fallback: Polymarket data-api (public, no auth required) */
+    /* Data API v2 (public, no auth) — the CLOB /trades endpoint is L2-only
+       (401s without auth headers) and the legacy v1 data-api is 410-gone. */
     return this.fetchFromDataApi();
   }
 
@@ -159,29 +147,13 @@ export class WhaleCandidates {
       for (const m of markets.slice(0, 5)) {
         if (!m.conditionId) continue;
         try {
-          const tradesRes = await fetch(`${dataApi}/trades?market=${m.conditionId}&limit=200`);
-          if (!tradesRes.ok) continue;
-
-          interface DataApiTrade {
-            transactionHash?: string;
-            proxyWallet?: string;
-            side?: string;
-            size?: number | string;
-            price?: number | string;
-            timestamp?: number;
-            asset?: string;
-          }
-
-          const raw: DataApiTrade[] = await tradesRes.json() as DataApiTrade[];
-          if (!Array.isArray(raw)) continue;
-
-          for (const t of raw) {
-            if (!t.proxyWallet || !t.side || t.size == null || t.price == null) continue;
+          const page = await fetchV2TradesPage(dataApi, { condition: m.conditionId, limit: 200 });
+          for (const t of page.trades) {
             allTrades.push({
-              id: t.transactionHash ?? '',
-              market: m.conditionId!,
-              asset_id: t.asset ?? '',
-              side: (t.side?.toUpperCase() === 'SELL' ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
+              id: t.transactionHash,
+              market: m.conditionId,
+              asset_id: t.asset,
+              side: t.side,
               size: String(t.size),
               price: String(t.price),
               match_time: t.timestamp

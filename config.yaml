@@ -223,6 +223,20 @@ whale_tracking:
   enabled: true
   dbPath: .runtime/whales.db
 
+  # ── Polywhaler Leaderboard Seeding (public API, verified 2026-11-11) ──
+  # polywhaler.com/api/leaderboard returns full 0x wallet addresses with
+  # smart-money scores. Seeds whales.db (tracking_enabled=1) so the 60s
+  # bridge feeds every copy_trade runner with REAL proven whales.
+  polywhalerSeed:
+    enabled: true
+    pages: 3            # 3 pages × 50 entries scanned
+    minScore: 70        # smart-money score floor
+    minWinRate: 55      # win-rate floor (%)
+    minTrades: 30       # lifetime trades floor
+    topK: 25            # max whales kept tracked
+    skipConfirmedInsiders: true
+    refreshHours: 12
+
   # Ingestion
   pollIntervalMs: 30000
   backfillBatchSize: 100

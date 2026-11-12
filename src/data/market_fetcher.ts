@@ -72,7 +72,14 @@ export class MarketFetcher {
       const response = await fetch(url);
 
       if (!response.ok) {
-        logger.error({ status: response.status, offset }, 'Gamma API page request failed');
+        if (response.status === 422) {
+          /* Gamma caps deep offsets (422 past ~offset 2100) — that is the
+             graceful end of pagination, not an error worth logging every
+             refresh cycle. */
+          logger.debug({ offset }, 'Gamma API offset cap reached — end of pages');
+        } else {
+          logger.error({ status: response.status, offset }, 'Gamma API page request failed');
+        }
         break;
       }
 
