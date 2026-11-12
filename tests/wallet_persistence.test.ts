@@ -289,3 +289,66 @@ describe('PaperWallet — snapshot restore + persistence hook', () => {
     store2.close();
   });
 });
+
+describe('WalletStore v4 - LIVE wallet RECORD persistence (no secrets)', () => {
+  it('saves/restores LIVE + LIVE_LANE rows with mode and lane parent; absent mode defaults to PAPER', () => {
+    const store = new WalletStore(TEST_DB);
+    const base = {
+      displayName: 'live_main',
+      strategy: 'copy_trade',
+      capital: 1000,
+      balance: 1000,
+      realizedPnl: 0,
+      openPositions: [],
+      riskLimits,
+      trades: [] as TradeRecord[],
+      paused: true,
+      source: 'dashboard' as const,
+      whaleAddresses: [],
+    };
+    store.savePaperWallet({ ...base, walletId: 'live_main', mode: 'LIVE' });
+    store.savePaperWallet({ ...base, walletId: 'lane_1', mode: 'LIVE_LANE', parentWalletId: 'live_main' });
+    store.savePaperWallet({ ...base, walletId: 'paper_x' }); // no mode -> PAPER
+    store.close();
+
+    // "Restart": the rows must come back with their mode/parent intact
+    const store2 = new WalletStore(TEST_DB);
+    const rows = store2.listPaperWallets();
+    const live = rows.find((r) => r.walletId === 'live_main');
+    const lane = rows.find((r) => r.walletId === 'lane_1');
+    const paper = rows.find((r) => r.walletId === 'paper_x');
+    expect(live?.mode).toBe('LIVE');
+    expect(live?.parentWalletId).toBeUndefined();
+    expect(live?.paused).toBe(true);
+    expect(lane?.mode).toBe('LIVE_LANE');
+    expect(lane?.parentWalletId).toBe('live_main');
+    expect(paper?.mode).toBe('PAPER');
+    // No credential columns exist anywhere in the table - secrets never persist
+    const cols = (store2 as unknown as { db: Database.Database }).db
+      .prepare('PRAGMA table_info(paper_wallets)').all() as Array<{ name: string }>;
+    const names = cols.map((c) => c.name);
+    expect(names).not.toContain('api_key');
+    expect(names).not.toContain('api_secret');
+    store2.close();
+  });
+
+  it('migrates a pre-v4 DB (no mode column) and reads old rows as PAPER', () => {
+    // Build an old-schema DB by hand (v3 shape)
+    const raw = new Database(TEST_DB);
+    raw.exec(`CREATE TABLE paper_wallets (
+      wallet_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, strategy TEXT NOT NULL,
+      capital REAL NOT NULL, balance REAL NOT NULL, realized_pnl REAL NOT NULL,
+      open_positions TEXT NOT NULL, risk_limits TEXT NOT NULL, trades TEXT NOT NULL,
+      paused INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT 'dashboard', whale_addresses TEXT)`);
+    raw.prepare(`INSERT INTO paper_wallets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      'old_w', 'Old', 'momentum', 100, 100, 0, '[]', JSON.stringify(riskLimits), '[]', 0, Date.now(), 'dashboard', null,
+    );
+    raw.close();
+
+    const store = new WalletStore(TEST_DB); // constructor runs the v4 migration
+    const rows = store.listPaperWallets();
+    expect(rows.find((r) => r.walletId === 'old_w')?.mode).toBe('PAPER');
+    store.close();
+  });
+});

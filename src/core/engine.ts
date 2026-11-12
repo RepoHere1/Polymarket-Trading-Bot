@@ -207,6 +207,11 @@ export class Engine {
       .map((r) => r.strategy);
   }
 
+  /** Get the strategy instance running for one specific wallet (if any). */
+  getRunnerStrategy(walletId: string): StrategyInterface | undefined {
+    return this.runners.find((r) => r.walletId === walletId)?.strategy;
+  }
+
   /* ━━━━━━━━━━━━━━ Pause / Resume ━━━━━━━━━━━━━━ */
 
   /**

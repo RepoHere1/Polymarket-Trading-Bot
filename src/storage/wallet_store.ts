@@ -8,10 +8,15 @@
    display name, paused flag) is snapshotted on every mutation and rehydrated
    on boot.
 
-   LIVE / LIVE_LANE wallets are intentionally NOT persisted — their polyUSA
-   credentials live in memory by design and must never be written to disk;
-   rehydrating them from .env could silently trade a different account.
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+   LIVE / LIVE_LANE wallets: since v4 the RECORD is persisted when the wallet
+   runs on the server's .env polyUSA credentials - but NEVER any credential
+   material (no API key, no secret; rule: credentials never touch disk).
+   On boot, an armed server (ENABLE_LIVE_TRADING=true) re-wires the wallet
+   through the .env client factory, so one LIVE wallet survives restarts.
+   Imported-credential LIVE wallets remain in-memory only (their secret
+   cannot and must not be stored), and restore of env-backed wallets is
+   skipped with a warning when the server is not armed.
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 import Database from 'better-sqlite3';
 import path from 'path';
@@ -36,6 +41,15 @@ export interface PersistedPaperWallet {
    * whale list survives restarts with the wallet.
    */
   whaleAddresses?: string[];
+  /**
+   * Wallet mode (v4 column). 'PAPER' for all pre-v4 rows (default). LIVE and
+   * LIVE_LANE rows exist ONLY for wallets that run on the server's .env
+   * polyUSA credentials — the row stores the wallet record, never secrets.
+   * Restored on boot only when the server is armed (ENABLE_LIVE_TRADING).
+   */
+  mode?: 'PAPER' | 'LIVE' | 'LIVE_LANE';
+  /** For LIVE_LANE rows: the parent LIVE account wallet id. */
+  parentWalletId?: string;
   /**
    * Where the row came from — decides restore semantics:
    * - 'dashboard': wallet born in the UI → FULL state is restored on boot and
@@ -83,14 +97,25 @@ export class WalletStore {
     if (!cols3.some((c) => c.name === 'whale_addresses')) {
       this.db.exec('ALTER TABLE paper_wallets ADD COLUMN whale_addresses TEXT');
     }
+    /* v4 migration - wallet mode + LIVE lane parent. LIVE / LIVE_LANE rows
+       are written only for env-credential wallets and never contain
+       secrets; they let one LIVE wallet survive restarts on an armed
+       server. Old rows default to PAPER (previous behaviour). */
+    const cols4 = this.db.prepare('PRAGMA table_info(paper_wallets)').all() as Array<{ name: string }>;
+    if (!cols4.some((c) => c.name === 'mode')) {
+      this.db.exec("ALTER TABLE paper_wallets ADD COLUMN mode TEXT NOT NULL DEFAULT 'PAPER'");
+    }
+    if (!cols4.some((c) => c.name === 'parent_wallet_id')) {
+      this.db.exec('ALTER TABLE paper_wallets ADD COLUMN parent_wallet_id TEXT');
+    }
   }
 
   savePaperWallet(w: PersistedPaperWallet): void {
     this.db.prepare(`
       INSERT INTO paper_wallets
         (wallet_id, display_name, strategy, capital, balance, realized_pnl,
-         open_positions, risk_limits, trades, paused, updated_at, source, whale_addresses)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         open_positions, risk_limits, trades, paused, updated_at, source, whale_addresses, mode, parent_wallet_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(wallet_id) DO UPDATE SET
         display_name   = excluded.display_name,
         strategy       = excluded.strategy,
@@ -103,7 +128,9 @@ export class WalletStore {
         paused         = excluded.paused,
         updated_at     = excluded.updated_at,
         source         = excluded.source,
-        whale_addresses = excluded.whale_addresses
+        whale_addresses = excluded.whale_addresses,
+        mode           = excluded.mode,
+        parent_wallet_id = excluded.parent_wallet_id
     `).run(
       w.walletId,
       w.displayName,
@@ -118,6 +145,8 @@ export class WalletStore {
       Date.now(),
       w.source,
       w.whaleAddresses && w.whaleAddresses.length > 0 ? JSON.stringify(w.whaleAddresses) : null,
+      w.mode ?? 'PAPER',
+      w.mode === 'LIVE_LANE' ? (w.parentWalletId ?? null) : null,
     );
   }
 
@@ -141,6 +170,8 @@ export class WalletStore {
         paused: number;
         source: string;
         whale_addresses: string | null;
+        mode: string;
+        parent_wallet_id: string | null;
       }>;
     return rows.map((r) => ({
       walletId: r.wallet_id,
@@ -155,6 +186,8 @@ export class WalletStore {
       paused: r.paused === 1,
       source: r.source === 'dashboard' ? 'dashboard' : 'config',
       whaleAddresses: r.whale_addresses ? (JSON.parse(r.whale_addresses) as string[]) : [],
+      mode: r.mode === 'LIVE' || r.mode === 'LIVE_LANE' ? r.mode : 'PAPER',
+      parentWalletId: r.parent_wallet_id ?? undefined,
     }));
   }
 

@@ -3,7 +3,7 @@ import path from 'path';
 import { WalletManager } from '../wallets/wallet_manager';
 import { polyUsaClientFactory, PolymarketWallet } from '../wallets/polymarket_wallet';
 import { PaperWallet } from '../wallets/paper_wallet';
-import { WalletStore } from '../storage/wallet_store';
+import { WalletStore, PersistedPaperWallet } from '../storage/wallet_store';
 import { MarketFetcher } from '../data/market_fetcher';
 import { buildDashboardPayload } from './dashboard_api';
 import { listStrategies } from '../strategies/registry';
@@ -706,6 +706,10 @@ export class DashboardServer {
   private readonly walletDisplayNames = new Map<string, string>();
   /** LIVE walletId → polyUSA API keyId it trades with (keyId only — never the secret). */
   private readonly liveApiKeyByWallet = new Map<string, string>();
+  /** LIVE/LIVE_LANE wallet ids running on the server's .env credentials (persisted record, zero secrets). */
+  private readonly liveEnvWalletIds = new Set<string>();
+  /** LIVE_LANE wallet id -> parent LIVE account wallet id (needed for restore). */
+  private readonly liveLaneParents = new Map<string, string>();
   /** SQLite persistence for PAPER wallets (dashboard wallets survive restarts). */
   private walletStore?: WalletStore;
   /** Wallets born in the dashboard — full-state persistence; config.yaml wallets persist pause-only. */
@@ -779,12 +783,22 @@ export class DashboardServer {
     }
   }
 
-  /** Snapshot a PAPER wallet (state + trades + name + paused) into SQLite. No-op for other modes. */
+  /** Snapshot a wallet (state + trades + name + paused) into SQLite.
+      PAPER wallets always. LIVE / LIVE_LANE wallets only when they run on
+      the server's .env credentials: the row stores the wallet RECORD only,
+      never any secret - restore re-wires the .env client. Config.yaml LIVE
+      wallets persist pause-choice rows (source 'config' restores the pause
+      flag only and never resurrects a wallet). */
   private persistPaperWallet(walletId: string): void {
     const wallet = this.walletManager.getWallet(walletId);
     if (!wallet) return;
     const state = wallet.getState();
-    if (state.mode !== 'PAPER') return; // LIVE wallets: exchange truth + in-memory credentials — never persisted
+    const mode = state.mode;
+    if (mode !== 'PAPER' && mode !== 'LIVE' && mode !== 'LIVE_LANE') return;
+    const isDashboard = this.dashboardWalletIds.has(walletId);
+    /* Imported-credential LIVE wallet: the secret lives only in memory and
+       must never touch disk - nothing restorable exists, skip entirely. */
+    if (mode !== 'PAPER' && !this.liveEnvWalletIds.has(walletId) && isDashboard) return;
     this.store().savePaperWallet({
       walletId,
       displayName: this.walletDisplayNames.get(walletId) ?? (wallet.getDisplayName?.() ?? walletId),
@@ -796,15 +810,17 @@ export class DashboardServer {
       riskLimits: state.riskLimits,
       trades: this.walletManager.getTradeHistory(walletId),
       paused: this.engine?.isRunnerPaused(walletId) ?? false,
-      source: this.dashboardWalletIds.has(walletId) ? 'dashboard' : 'config',
+      source: isDashboard ? 'dashboard' : 'config',
       whaleAddresses: this.walletWhaleAddresses.get(walletId) ?? [],
+      mode,
+      parentWalletId: mode === 'LIVE_LANE' ? this.liveLaneParents.get(walletId) : undefined,
     });
   }
-
   /** Rehydrate PAPER wallets from SQLite so they survive restarts. */
   private restorePersistedWallets(): void {
     const persisted = this.store().listPaperWallets();
     let restoredCount = 0;
+    const liveRows: PersistedPaperWallet[] = [];
     for (const p of persisted) {
       const existing = this.walletManager.getWallet(p.walletId);
 
@@ -829,6 +845,13 @@ export class DashboardServer {
         /* The wallet is gone from config.yaml — the row must NOT resurrect it. */
         this.store().deleteWallet(p.walletId);
         logger.info({ walletId: p.walletId }, 'Stale config wallet row deleted (wallet removed from config.yaml)');
+        continue;
+      }
+
+      /* LIVE / LIVE_LANE rows restore in a second pass (accounts first, then
+         lanes - a lane needs its parent wallet alive). */
+      if (p.mode === 'LIVE' || p.mode === 'LIVE_LANE') {
+        liveRows.push(p);
         continue;
       }
 
@@ -862,6 +885,97 @@ export class DashboardServer {
         wallets: persisted.filter((p) => this.dashboardWalletIds.has(p.walletId)).map((p) => p.walletId),
       });
     }
+
+    /* LIVE wallets restore in two passes: accounts first, then lanes (a lane
+       needs its parent alive). Rows on an unarmed server are KEPT with a
+       warning - they come back the next time the server boots armed. */
+    for (const p of liveRows.filter((r) => r.mode === 'LIVE')) this.restoreLiveWalletRow(p);
+    for (const p of liveRows.filter((r) => r.mode === 'LIVE_LANE')) this.restoreLiveLaneRow(p);
+  }
+
+  /** Re-wire a persisted env-credential LIVE wallet (armed servers only). */
+  private restoreLiveWalletRow(p: PersistedPaperWallet): void {
+    const armed = process.env.ENABLE_LIVE_TRADING === 'true';
+    const envKey = process.env.POLYMARKET_API_KEY ?? '';
+    const envSecret = process.env.POLYMARKET_API_SECRET ?? '';
+    if (!armed || !envKey || !envSecret) {
+      logger.warn(
+        { walletId: p.walletId, armed, hasEnvCreds: Boolean(envKey && envSecret) },
+        `LIVE wallet "${p.walletId}" NOT restored (row kept) - server is not armed or .env polyUSA credentials are missing. Restart armed (.\\start_bot.ps1 -Live) to bring it back.`,
+      );
+      return;
+    }
+    const wallet = this.walletManager.createLiveWallet(
+      { id: p.walletId, mode: 'LIVE', strategy: p.strategy, capital: p.capital, riskLimits: p.riskLimits },
+      p.strategy,
+      undefined, // .env credential factory - no secret is ever read from the row
+    );
+    this.walletManager.addWallet(wallet);
+    this.liveApiKeyByWallet.set(p.walletId, envKey);
+    this.liveEnvWalletIds.add(p.walletId);
+    this.dashboardWalletIds.add(p.walletId);
+    this.walletDisplayNames.set(p.walletId, p.displayName);
+    if ((p.whaleAddresses ?? []).length > 0) this.walletWhaleAddresses.set(p.walletId, p.whaleAddresses as string[]);
+    this.pendingRestoredRunners.push({
+      walletId: p.walletId,
+      strategy: p.strategy,
+      paused: p.paused,
+      attachRunner: true,
+      whaleAddresses: p.whaleAddresses ?? [],
+    });
+    logger.info(
+      { walletId: p.walletId, strategy: p.strategy, paused: p.paused },
+      'LIVE wallet restored from disk (.env credentials, no secrets stored)',
+    );
+    /* Pull exchange truth immediately; the 15s refresh keeps it current. */
+    void wallet.refreshState(true).catch(() => { /* retried by the periodic refresh */ });
+  }
+
+  /** Re-wire a persisted LIVE lane under its parent account wallet. */
+  private restoreLiveLaneRow(p: PersistedPaperWallet): void {
+    const parentId = p.parentWalletId ?? '';
+    const parent = parentId ? this.walletManager.getWallet(parentId) : undefined;
+    if (!parent || parent.getState().mode !== 'LIVE') {
+      logger.warn(
+        { walletId: p.walletId, parentId },
+        `LIVE lane "${p.walletId}" NOT restored (row kept) - parent "${parentId}" is not a LIVE wallet on this server`,
+      );
+      return;
+    }
+    const lane = this.walletManager.createLiveLaneWallet(
+      parentId,
+      { id: p.walletId, mode: 'LIVE_LANE', strategy: p.strategy, capital: p.capital, riskLimits: p.riskLimits },
+      p.strategy,
+    );
+    this.walletManager.addWallet(lane);
+    this.walletManager.registerLiveLane(parentId, p.walletId, p.capital);
+    this.liveEnvWalletIds.add(p.walletId);
+    this.liveLaneParents.set(p.walletId, parentId);
+    this.dashboardWalletIds.add(p.walletId);
+    if ((p.whaleAddresses ?? []).length > 0) this.walletWhaleAddresses.set(p.walletId, p.whaleAddresses as string[]);
+    /* Boot-time mirror of the creation gate: an account wallet and its lanes
+       must not both run (double-spend). If the parent is not restored paused,
+       the lane comes back PAUSED with a warning; the operator resumes it
+       after pausing the parent. */
+    const parentPaused = this.pendingRestoredRunners.some((r) => r.walletId === parentId && r.paused);
+    const lanePaused = p.paused || !parentPaused;
+    if (!p.paused && !parentPaused) {
+      logger.warn(
+        { walletId: p.walletId, parentId },
+        `LIVE lane "${p.walletId}" restored PAUSED - its parent account wallet "${parentId}" is running (pause the parent, then resume the lane)`,
+      );
+    }
+    this.pendingRestoredRunners.push({
+      walletId: p.walletId,
+      strategy: p.strategy,
+      paused: lanePaused,
+      attachRunner: true,
+      whaleAddresses: p.whaleAddresses ?? [],
+    });
+    logger.info(
+      { walletId: p.walletId, parentId, budget: p.capital, paused: lanePaused },
+      'LIVE lane restored from disk',
+    );
   }
 
   private attachRestoredRunner(
@@ -1183,6 +1297,12 @@ export class DashboardServer {
         if (this.engine) {
           this.engine.addRunner(walletId, strategy, whaleAddresses.length > 0 ? { whale_addresses: whaleAddresses } : undefined);
         }
+        /* Persist the lane RECORD (no secrets): it is restored automatically
+           whenever the server restarts armed (.\start_bot.ps1 -Live). */
+        this.liveLaneParents.set(walletId, parentWalletId);
+        this.liveEnvWalletIds.add(walletId);
+        this.dashboardWalletIds.add(walletId);
+        this.persistPaperWallet(walletId);
         json(res, 201, {
           ok: true,
           message: `LIVE lane "${walletId}" created on account "${parentWalletId}" (${strategy}, budget $${capital} of $${balance.toFixed(2)} buying power). The lane can never spend past its budget — keep the parent paused. Orders stay preview-only until POLYMARKET_DRY_RUN=false.`,
@@ -1244,12 +1364,21 @@ export class DashboardServer {
         this.engine.addRunner(walletId, strategy, whaleAddresses.length > 0 ? { whale_addresses: whaleAddresses } : undefined);
       }
 
-      /* Persist PAPER wallets so they survive restarts. LIVE wallets hold
-         in-memory credentials by design and are intentionally not persisted. */
+      /* Persist PAPER wallets so they survive restarts. Env-credential LIVE
+         wallets persist their RECORD (never any secret) so they survive
+         restarts too - restored whenever the server boots armed. LIVE wallets
+         with imported credentials stay in-memory only (secret never on disk). */
       if (wallet instanceof PaperWallet) {
         this.dashboardWalletIds.add(walletId);
         wallet.attachPersistence(() => this.persistPaperWallet(walletId));
         this.persistPaperWallet(walletId);
+      }
+      if (mode === 'LIVE') {
+        this.dashboardWalletIds.add(walletId);
+        if (!importedCreds) {
+          this.liveEnvWalletIds.add(walletId);
+          this.persistPaperWallet(walletId);
+        }
       }
 
       /* PROOF OF LIVE WIRE: verify RIGHT NOW that this wallet is connected
@@ -1282,7 +1411,9 @@ export class DashboardServer {
       const message =
         mode === 'LIVE'
           ? `LIVE wallet "${walletId}" created (${strategy}, $${capital}). Fund it with USDC on polymarket.us — balance is read from the exchange. Credentials: ${
-              importedCreds ? 'imported (in-memory)' : 'environment (.env)'
+              importedCreds
+                ? 'imported (in-memory only - after a restart you must recreate the wallet; credentials are never written to disk)'
+                : 'environment (.env) - the wallet RECORD is persisted without secrets and is restored automatically whenever the server restarts armed (start_bot.ps1 -Live)'
             }. Orders stay preview-only until POLYMARKET_DRY_RUN=false.`
           : `Wallet "${walletId}" created (PAPER, ${strategy}, $${capital})`;
       json(res, 201, { ok: true, message });
@@ -1303,6 +1434,8 @@ export class DashboardServer {
       this.liveApiKeyByWallet.delete(walletId);
       this.dashboardWalletIds.delete(walletId);
       this.walletWhaleAddresses.delete(walletId);
+      this.liveEnvWalletIds.delete(walletId);
+      this.liveLaneParents.delete(walletId);
       this.walletStore?.deleteWallet(walletId); // forget persisted PAPER wallets too
       if (this.engine) {
         this.engine.removeRunner(walletId);
@@ -1369,6 +1502,15 @@ export class DashboardServer {
         this.engine?.isRunnerPaused(walletId) ?? false;
       (detail.wallet as Record<string, unknown>).whaleAddresses =
         this.walletWhaleAddresses.get(walletId) ?? [];
+      /* The EFFECTIVE list this strategy follows right now: form whales PLUS
+         everything the Whale Tracker bridge pushed in (polywhaler leaderboard
+         whales arrive through that bridge) - so the operator can SEE them. */
+      if (walletState.assignedStrategy === 'copy_trade') {
+        const inst = this.engine?.getRunnerStrategy(walletId);
+        if (inst instanceof CopyTradeStrategy) {
+          (detail.wallet as Record<string, unknown>).effectiveWhaleAddresses = inst.getWhaleAddresses();
+        }
+      }
       json(res, 200, detail);
       return;
     }
@@ -2971,8 +3113,8 @@ function renderWalletDetail(d){
 
   /* ── Copy-trade whales this wallet follows (per-wallet, from create form) ── */
   if(w.strategy==='copy_trade'){
-    const wl=Array.isArray(w.whaleAddresses)?w.whaleAddresses:[];
-    html+='<div style="margin:14px 0 0"><h3 style="margin:0 0 6px">\uD83D\uDC33 Whales Followed By This Wallet ('+wl.length+')</h3>'+
+    const wl=Array.isArray(w.effectiveWhaleAddresses)&&w.effectiveWhaleAddresses.length>0?w.effectiveWhaleAddresses:(Array.isArray(w.whaleAddresses)?w.whaleAddresses:[]);
+    html+='<div style="margin:14px 0 0"><h3 style="margin:0 0 6px">\uD83D\uDC33 Whales This Wallet Follows Now ('+wl.length+' - form entries + Whale Tracker / polywhaler bridge)</h3>'+
       '<div style="font-family:monospace;font-size:12px;line-height:1.8;word-break:break-all;padding:10px;border:1px solid var(--border);border-radius:8px">'+
       (wl.length?wl.map(a=>'<div>'+a+'</div>').join(''):'<span style="color:var(--accent)">None entered — follows whales promoted by the \uD83D\uDC33 Whale Tracker automatically.</span>')+
       '</div></div>';
@@ -3876,11 +4018,18 @@ cwToggleCreds();
 $('#cw-strategy').addEventListener('change',cwToggleWhales);
 
 $('#cw-submit').addEventListener('click',async()=>{
+  const id=$('#cw-id').value.trim();
+  if(!id){showMsg('cw-msg','err','Enter a Wallet ID');return}
+  const strat=$('#cw-strategy').value;
+  if(!strat){showMsg('cw-msg','err','Pick a strategy');return}
+  const capRaw=$('#cw-capital').value.trim();
+  const cap=Number(capRaw.replace(/[$,\s]/g,''));
+  if(!Number.isFinite(cap)||cap<=0){showMsg('cw-msg','err','Capital must be a number > 0. You typed "'+capRaw+'" - digits only (no $ sign, no commas).');return}
   const body={
-    walletId:$('#cw-id').value.trim(),
+    walletId:id,
     mode:$('#cw-mode').value,
-    strategy:$('#cw-strategy').value,
-    capital:Number($('#cw-capital').value),
+    strategy:strat,
+    capital:cap,
   };
   if(body.mode==='LIVE'){
     const k=$('#cw-apikey').value.trim();
@@ -3893,10 +4042,11 @@ $('#cw-submit').addEventListener('click',async()=>{
     if(!p){showMsg('cw-msg','err','Create & pause a LIVE account wallet first');return}
     body.parentWalletId=p;
   }
-  const mp=$('#cw-maxpos').value;if(mp)body.maxPositionSize=Number(mp);
-  const me=$('#cw-maxexp').value;if(me)body.maxExposurePerMarket=Number(me);
-  const ml=$('#cw-maxloss').value;if(ml)body.maxDailyLoss=Number(ml);
-  const mt=$('#cw-maxtrades').value;if(mt)body.maxOpenTrades=Number(mt);
+  const num=f=>{const v=$('#'+f).value.trim();if(!v)return undefined;const n=Number(v.replace(/[$,\s]/g,''));return Number.isFinite(n)?n:undefined};
+  const mp=num('cw-maxpos');if(mp!==undefined&&mp>0)body.maxPositionSize=mp;
+  const me=num('cw-maxexp');if(me!==undefined&&me>0)body.maxExposurePerMarket=me;
+  const ml=num('cw-maxloss');if(ml!==undefined&&ml>0)body.maxDailyLoss=ml;
+  const mt=num('cw-maxtrades');if(mt!==undefined&&mt>0)body.maxOpenTrades=mt;
   if(body.strategy==='copy_trade'){const wv=$('#cw-whales').value.trim();if(wv)body.whaleAddresses=wv}
 
   try{
