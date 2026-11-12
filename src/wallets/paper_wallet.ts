@@ -133,11 +133,11 @@ export class PaperWallet {
     const walletId = this.state.walletId;
     const data = this.marketData();
     if (!data) {
-      throw new Error(`PAPER ${walletId}: market data not connected â€” refusing to simulate a fill`);
+      throw new Error(`PAPER ${walletId}: market data not connected - refusing to simulate a fill`);
     }
     const market = data.stream.getMarket(request.marketId);
     if (!market) {
-      throw new Error(`PAPER ${walletId}: market ${request.marketId} not in live cache â€” refusing to simulate a fill`);
+      throw new Error(`PAPER ${walletId}: market ${request.marketId} not in live cache - refusing to simulate a fill`);
     }
     const tokenId = request.outcome === 'YES' ? market.clobTokenIds[0] : market.clobTokenIds[1];
     if (!tokenId) {
@@ -145,7 +145,7 @@ export class PaperWallet {
     }
     const book = await data.clobFetcher.fetchOrderBook(tokenId);
     if (!book) {
-      throw new Error(`PAPER ${walletId}: CLOB book unavailable for ${tokenId} â€” refusing to simulate a fill`);
+      throw new Error(`PAPER ${walletId}: CLOB book unavailable for ${tokenId} - refusing to simulate a fill`);
     }
 
     const pos = this.state.openPositions.find(
@@ -186,7 +186,7 @@ export class PaperWallet {
 
     consoleLog.success(
       'FILL',
-      `[${walletId}] ${request.side} ${request.outcome} Ã—${match.filledSize} @ $${match.avgPrice.toFixed(4)} (fee ${fee.toFixed(5)} USDC) â†’ PnL $${(realized - fee).toFixed(4)} | Bal $${this.state.availableBalance.toFixed(2)}`,
+      `[${walletId}] ${request.side} ${request.outcome} x${match.filledSize} @ $${match.avgPrice.toFixed(4)} (fee ${fee.toFixed(5)} USDC) -> PnL $${(realized - fee).toFixed(4)} | Bal $${this.state.availableBalance.toFixed(2)}`,
       { walletId, marketId: request.marketId, orderId, unfilled: match.unfilledSize },
     );
 

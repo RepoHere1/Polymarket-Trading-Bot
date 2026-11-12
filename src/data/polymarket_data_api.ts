@@ -158,7 +158,7 @@ export async function fetchV2TradesPage(
       const retryAfter = parseInt(res.headers.get('retry-after') ?? '', 10);
       const waitMs = (Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : 5) * 1000;
       if (attempt < MAX_RETRIES) {
-        logger.warn({ status: res.status, waitMs, path: url.pathname }, 'Data API v2 busy — backing off');
+        logger.warn({ status: res.status, waitMs, path: url.pathname }, 'Data API v2 busy - backing off');
         await sleep(waitMs);
         continue;
       }

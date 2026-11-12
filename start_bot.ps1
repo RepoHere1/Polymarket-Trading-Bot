@@ -70,4 +70,22 @@ Write-Host ""
 
 # Fresh log per run so watch.ps1 never shows a dead instance's spam.
 Set-Content -Path $botLog -Value '' -NoNewline
-node dist/cli.js start --config $Config 2>&1 | Tee-Object -FilePath $botLog
+# Node writes UTF-8. Force PowerShell to DECODE its stdout as UTF-8, or every
+# em-dash/arrow/multiplication sign in log lines becomes mojibake (the
+# "Gamma-hat" garbage) once it passes through this pipe.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
+
+# Tee the log as UTF-8 WITH BOM so any reader (watch.ps1, editors, type) decodes
+# it correctly on every PowerShell version.
+$logWriter = New-Object System.IO.StreamWriter($botLog, $false, (New-Object System.Text.UTF8Encoding($true)))
+$logWriter.AutoFlush = $true
+try {
+    node dist/cli.js start --config $Config 2>&1 | ForEach-Object {
+        $line = $_.ToString()
+        $logWriter.WriteLine($line)
+        Write-Output $line
+    }
+} finally {
+    $logWriter.Close()
+}
