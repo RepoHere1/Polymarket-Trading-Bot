@@ -4409,17 +4409,38 @@ async function loadCopyLinks(){
     const r=await fetch('/api/copy-links');
     if(!r.ok){document.getElementById('cl-lanes').innerHTML='<p class="empty">Copy links unavailable ('+r.status+').</p>';return}
     const d=await r.json();
+    /* Join the whale tracker (/api/whales) for names, provenance and stats */
+    const wmap={};
+    try{
+      const wr=await fetch('/api/whales');
+      if(wr.ok){
+        const wd=await wr.json();
+        const list=Array.isArray(wd)?wd:(wd.whales||[]);
+        for(const w of list){ if(w&&w.address) wmap[String(w.address).toLowerCase()]=w }
+      }
+    }catch(e){/* tracker unreachable — plain addresses still render */}
+    const trackedCount=Object.keys(wmap).length;
     const lanes=d.lanes||[];
     if(lanes.length===0){document.getElementById('cl-lanes').innerHTML='<p class="empty">No copy_trade wallets yet. Create one (Wallets tab, strategy COPY TRADE) to link whales to it.</p>';return}
     let html='';
+    if(trackedCount>0){html+='<p style="color:var(--accent);font-size:12px;margin:0 0 10px">Whale tracker connection: <strong>'+trackedCount+'</strong> whales tracked (leaderboard-style scores in the 🐋 Whales tab). Rows below show each whale the lane copies, where it came from (polywhaler / tracker / manual) and its live stats.</p>'}
     for(const ln of lanes){
       const badge=ln.mode==='LIVE_LANE'?'LIVE LANE':ln.mode;
       const on=ln.links.filter(l=>l.enabled).length;
       html+='<div class="wd-section" style="margin-bottom:14px"><h3>'+ln.displayName+' <span class="badge badge-'+ln.mode+'">'+badge+'</span> <span style="font-size:11px;color:var(--accent);font-weight:400">'+(ln.paused?'PAUSED':'RUNNING')+' &middot; '+on+' of '+ln.links.length+' link(s) ON</h3>';
       if(ln.links.length===0){html+='<p class="empty">No whales linked yet — the whale tracker adds promoted whales here automatically.</p></div>';continue}
-      html+='<table class="wd-mkt-table"><thead><tr><th>Whale address</th><th style="width:130px">Copy link</th></tr></thead><tbody>';
+      html+='<table class="wd-mkt-table"><thead><tr><th>Whale</th><th style="width:130px">Copy link</th></tr></thead><tbody>';
       for(const l of ln.links){
-        html+='<tr><td style="font-family:monospace;font-size:12px;word-break:break-all">'+l.address+'</td>'+
+        const w=wmap[l.address];
+        const name=w&&w.displayName?w.displayName:null;
+        const isPoly=w&&Array.isArray(w.tags)&&w.tags.indexOf('polywhaler')!==-1;
+        const prov=isPoly?'<span class="badge" style="background:rgba(0,214,143,.12);color:var(--green)">polywhaler</span>':(w?'<span class="badge badge-PAPER">tracker</span>':'<span class="badge badge-PAPER">manual</span>');
+        const stats=w?('WR '+Math.round((w.winRate||0)*100)+'% &middot; 30d PnL $'+Number(w.realizedPnl30d||0).toFixed(0)+' &middot; 30d Vol $'+Math.round(w.totalVolume30d||0)):'';
+        html+='<tr><td style="font-size:12px">'+
+          (name?'<strong>'+name+'</strong> ':'')+prov+'<br>'+
+          '<span style="font-family:monospace;word-break:break-all">'+l.address+'</span>'+
+          (stats?'<br><span style="color:var(--accent);font-size:11px">'+stats+'</span>':'')+
+          '</td>'+
           '<td><button class="toggle-btn '+(l.enabled?'running':'paused')+'" onclick="toggleCopyLink(\\''+ln.walletId+'\\',\\''+l.address+'\\','+l.enabled+')" title="'+(l.enabled?'Turn this copy link OFF (stops copying this whale; survives restarts)':'Turn this copy link back ON')+'"><span class="toggle-dot"></span>'+(l.enabled?'ON':'OFF')+'</button></td></tr>';
       }
       html+='</tbody></table></div>';
