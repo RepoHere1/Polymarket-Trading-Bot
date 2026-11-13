@@ -178,6 +178,10 @@ strategy_config:
   copy_trade:
     # Whale addresses to follow (add Polymarket proxy wallet addresses)
     whale_addresses: []
+    # OPERATOR WHALES ONLY (owner decision 2026-11-12): copy lanes follow
+    # ONLY whales wired from the dashboard (one whale per card is the
+    # design). Set true to restore auto-following every tracker whale.
+    auto_follow_tracker: false
     # 'mirror' = same direction as whale, 'inverse' = contrarian
     copy_mode: mirror
     data_api_url: https://data-api.polymarket.com
@@ -197,9 +201,12 @@ strategy_config:
     min_whale_win_rate: 0.50
     # ── Position Sizing ──
     size_mode: fixed                    # fixed | proportional | kelly
-    fixed_size: 10
-    proportional_factor: 0.10          # when size_mode = proportional
-    max_capital_per_trade_pct: 0.05
+    fixed_size: 10                      # USD notional per copy trade (fixed mode)
+    proportional_factor: 0.10           # when size_mode: proportional
+    # Max fraction of capital risked per trade. 0.20 so SMALL lanes ($5)
+    # can still afford ~1 share — 0.05 capped $5 lanes at $0.25/trade and
+    # nothing could ever copy.
+    max_capital_per_trade_pct: 0.20
     max_shares_per_order: 50
     # ── Risk / Exposure ──
     max_open_positions: 15

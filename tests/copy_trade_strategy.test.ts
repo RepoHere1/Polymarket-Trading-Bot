@@ -187,7 +187,7 @@ describe('CopyTradeStrategy — Initialisation', () => {
    2. WHALE TRADE POLLING
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 describe('CopyTradeStrategy — Polling', () => {
-  it('polls data API on timer', async () => {
+  it('polls data API on timer (unknown whale market triggers one gamma fetch)', async () => {
     const s = createStrategy({ poll_interval_seconds: 0 });
     fetchMock.mockResolvedValue({
       ok: true,
@@ -195,8 +195,11 @@ describe('CopyTradeStrategy — Polling', () => {
     });
 
     await s.onTimer();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[0][0]).toContain(`user=${WHALE_A}`);
+    // second call = on-demand gamma metadata for the whale's market ('mkt-1'
+    // was never broadcast to this strategy)
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/markets?condition_ids=');
   });
 
   it('does not poll before interval elapses', async () => {
@@ -310,9 +313,9 @@ describe('CopyTradeStrategy — Copy Modes', () => {
    4. POSITION SIZING
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 describe('CopyTradeStrategy — Sizing', () => {
-  it('sizes with fixed mode', async () => {
+  it('sizes with fixed mode (fixed_size is USD notional → shares = $ / price)', async () => {
     const s = createStrategy({ poll_interval_seconds: 0, size_mode: 'fixed', fixed_size: 15 });
-    s.onMarketUpdate(mkMarket());
+    s.onMarketUpdate(mkMarket()); // price 0.60
 
     fetchMock.mockResolvedValue({
       ok: true,
@@ -323,7 +326,8 @@ describe('CopyTradeStrategy — Sizing', () => {
     const signals = s.generateSignals();
     const orders = s.sizePositions(signals);
     expect(orders.length).toBe(1);
-    expect(orders[0].size).toBe(15);
+    expect(orders[0].size).toBe(25); // $15 notional / $0.60 = 25 shares
+    expect(orders[0].size * orders[0].price).toBeCloseTo(15, 5);
   });
 
   it('sizes with proportional mode', async () => {
@@ -833,5 +837,110 @@ describe('CopyTradeStrategy — Rotating poll window', () => {
 
     await s.onTimer();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   11. SMALL-LANE VIABILITY — $5 lanes must be able to copy at all
+   (old defaults: fixed_size treated as SHARES + 5% capital cap =
+   $0.25/trade on $5 → every signal died in sizing, lanes NEVER traded)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+describe('CopyTradeStrategy — Small-lane viability', () => {
+  it('a $5 lane with default caps can still afford a copy order', async () => {
+    const s = new CopyTradeStrategy();
+    s.initialize({
+      wallet: mkWallet({ capitalAllocated: 5, availableBalance: 5 }),
+      config: {
+        ...DEFAULT_COPY_TRADE_CONFIG,
+        whale_addresses: [WHALE_A],
+        poll_interval_seconds: 0,
+      } as unknown as Record<string, unknown>,
+    });
+    s.onMarketUpdate(mkMarket()); // price 0.60, liquidity 5k, volume 20k
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => mkApiTrades([{ hash: 'tx-small1', side: 'BUY', size: 1000, price: 0.60 }]),
+    });
+
+    await s.onTimer();
+    const orders = s.sizePositions(s.generateSignals());
+    expect(orders.length).toBe(1);
+    // 20% of $5 = $1 cap → floor($1 / $0.60) = 1 share = $0.60 — affordable
+    expect(orders[0].size).toBe(1);
+    expect(orders[0].size * orders[0].price).toBeCloseTo(0.6, 5);
+  });
+});
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   12. ON-DEMAND GAMMA MARKET FETCH — whale markets outside the
+   engine's broadcast set must still be sizeable (real data or nothing)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+describe('CopyTradeStrategy — On-demand gamma market fetch', () => {
+  it('fetches an unknown whale market from gamma and sizes on it', async () => {
+    const s = createStrategy({ poll_interval_seconds: 0 });
+    // NOTE: no onMarketUpdate for 'mkt-gamma' — it must come from gamma.
+
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes('/v2/trades')) {
+        return {
+          ok: true,
+          json: async () => mkApiTrades([{ hash: 'tx-g1', side: 'BUY', size: 2000, price: 0.25, conditionId: 'mkt-gamma' }]),
+        };
+      }
+      if (url.includes('/markets?condition_ids=')) {
+        return {
+          ok: true,
+          json: async () => ([{
+            conditionId: 'mkt-gamma',
+            question: 'Will gamma test pass?',
+            slug: 'will-gamma-test-pass',
+            outcomes: JSON.stringify(['Yes', 'No']),
+            outcomePrices: JSON.stringify(['0.25', '0.75']),
+            clobTokenIds: JSON.stringify(['tok-g-yes', 'tok-g-no']),
+            bestBid: 0.24,
+            bestAsk: 0.26,
+            volume24hr: 50_000,
+            liquidityNum: 10_000,
+          }]),
+        };
+      }
+      return { ok: true, json: async () => ({ data: [], pagination: { next_cursor: null, has_more: false } }) };
+    });
+
+    await s.onTimer();
+    // let the fire-and-forget gamma fetch settle
+    await new Promise((r) => setTimeout(r, 25));
+
+    const orders = s.sizePositions(s.generateSignals());
+    expect(orders.length).toBe(1);
+    expect(orders[0].marketId).toBe('mkt-gamma');
+    expect(orders[0].price).toBeCloseTo(0.25, 4);
+    expect(orders[0].size).toBe(40); // $10 notional / $0.25
+  });
+
+  it('never fabricates a market when gamma returns nothing usable', async () => {
+    const s = createStrategy({ poll_interval_seconds: 0 });
+
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes('/v2/trades')) {
+        return {
+          ok: true,
+          json: async () => mkApiTrades([{ hash: 'tx-g2', side: 'BUY', size: 2000, price: 0.4, conditionId: 'mkt-ghost' }]),
+        };
+      }
+      if (url.includes('/markets?condition_ids=')) {
+        return { ok: true, json: async () => [] }; // gamma knows nothing
+      }
+      return { ok: true, json: async () => ({ data: [], pagination: { next_cursor: null, has_more: false } }) };
+    });
+
+    await s.onTimer();
+    await new Promise((r) => setTimeout(r, 25));
+
+    const orders = s.sizePositions(s.generateSignals());
+    expect(orders.length).toBe(0); // no real market data → no trade, ever
   });
 });

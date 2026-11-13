@@ -259,14 +259,18 @@ program
     /* Whale Tracking → copy-trade bridge: every whale the tracking engine
        promotes is pushed into ALL copy_trade runners (PAPER and LIVE), so the
        strategies follow the same real whales the tracker qualified — no
-       manual address bookkeeping. The strategies still poll the real Data
-       API for those addresses and only fill against real books.
+       manual address bookkeeping. SUPERSEDED 2026-11-12: auto-wiring is
+       now OFF by default (auto_follow_tracker gate below) so lanes follow
+       ONLY operator-added whales (the strategies still poll the real Data
+       API for those addresses and fill only against real books).
         ONE exception (operator decision 2026-11-11): whole-account LIVE
         wallets (mode LIVE) are NEVER auto-wired — whales may only draw real
         money through LIVE copy lanes the operator explicitly creates (create
         form or LIVE twin), where the lane ON/OFF and per-whale toggles gate
         the copying. */
     if (whaleService) {
+      const autoFollow = config.strategyConfig?.copy_trade?.auto_follow_tracker === true;
+      if (autoFollow) {
       const syncWhales = () => {
         try {
           const { whales } = whaleService!.listWhales({ trackingEnabled: true, limit: 1000 });
@@ -289,6 +293,9 @@ program
         }
       };
       setInterval(syncWhales, 60_000);
+      } else {
+        logger.info('Whale→copy_trade auto-wire OFF (auto_follow_tracker=false) — lanes follow operator-added whales only');
+      }
     }
 
     writeState({ status: 'running', startedAt: new Date().toISOString() });

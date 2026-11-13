@@ -33,6 +33,9 @@ export interface CopyTradeConfig {
 
   /** Data API URL for fetching whale trades */
   data_api_url: string;
+  /** Gamma API URL for on-demand market metadata (whale markets may be
+   *  outside the engine's broadcast set — sizing needs real quotes) */
+  gamma_api_url: string;
 
   /* ── Polling ── */
   /** How often to poll for new whale trades (seconds) */
@@ -57,11 +60,14 @@ export interface CopyTradeConfig {
   /* ── Position Sizing ── */
   /** Sizing mode: 'fixed' | 'proportional' | 'kelly' */
   size_mode: 'fixed' | 'proportional' | 'kelly';
-  /** Fixed number of shares when size_mode = 'fixed' */
+  /** Fixed USD NOTIONAL per trade when size_mode = 'fixed' (shares are
+   *  derived from the live price — this is dollars, not share count). */
   fixed_size: number;
   /** Fraction of whale's size when size_mode = 'proportional' (0-1) */
   proportional_factor: number;
-  /** Max fraction of wallet capital per single trade */
+  /** Max fraction of wallet capital per single trade. Keep this sane for
+   *  SMALL lanes: at 0.05 a $5 lane can only risk $0.25 per trade — not
+   *  even one share at most prices, so nothing can ever copy. */
   max_capital_per_trade_pct: number;
   /** Max shares per single order */
   max_shares_per_order: number;
@@ -109,6 +115,7 @@ export const DEFAULT_COPY_TRADE_CONFIG: CopyTradeConfig = {
   whale_addresses: [],
   copy_mode: 'mirror',
   data_api_url: 'https://data-api.polymarket.com',
+  gamma_api_url: 'https://gamma-api.polymarket.com',
   poll_interval_seconds: 30,
   max_polls_per_tick: 25,
   max_trade_age_seconds: 600,
@@ -118,7 +125,7 @@ export const DEFAULT_COPY_TRADE_CONFIG: CopyTradeConfig = {
   size_mode: 'fixed',
   fixed_size: 10,
   proportional_factor: 0.10,
-  max_capital_per_trade_pct: 0.05,
+  max_capital_per_trade_pct: 0.20,
   max_shares_per_order: 50,
   max_open_positions: 15,
   max_exposure_per_market_usd: 500,
@@ -202,6 +209,8 @@ export class CopyTradeStrategy extends BaseStrategy {
   /** Rotating poll cursor — index into whale_addresses where the next
    *  tick's window starts (keeps per-tick bursts inside the API budget). */
   private pollCursor = 0;
+  /** Markets currently being fetched from gamma (dedupe in-flight). */
+  private marketFetchInFlight = new Set<string>();
   private totalDailyVolumeUsd = 0;
   private dailyVolumeResetAt = 0;
   private cumulativePnlBps = 0;
@@ -296,6 +305,10 @@ export class CopyTradeStrategy extends BaseStrategy {
           if (signal) {
             this.pendingSignals.push(signal);
             this.pendingWhaleTrades.push(trade);
+            /* Whale markets can be outside the engine's broadcast set —
+               pull REAL gamma metadata on demand so sizing can proceed
+               (cached; no data → no trade, never fabricated). */
+            void this.ensureMarketData(trade.marketId);
           }
         }
 
@@ -640,7 +653,9 @@ export class CopyTradeStrategy extends BaseStrategy {
 
     switch (this.cfg.size_mode) {
       case 'fixed':
-        size = this.cfg.fixed_size;
+        /* fixed_size is USD NOTIONAL (matches the dashboard form unit).
+           Shares = dollars / price, then capped by capital + share caps. */
+        size = Math.floor(this.cfg.fixed_size / Math.max(price, 0.01));
         break;
 
       case 'proportional': {
@@ -667,6 +682,80 @@ export class CopyTradeStrategy extends BaseStrategy {
     size = Math.min(size, maxFromCapital, this.cfg.max_shares_per_order);
 
     return Math.max(0, size);
+  }
+
+  /* ━━━━━━━━━━━━━━ On-demand market metadata (gamma) ━━━━━━━━━━━━━━ */
+
+  /** Markets the whale trades in may never appear in the engine's broadcast
+   *  set — without market data, sizing silently drops every signal. Fetch
+   *  the REAL row from gamma once per market and cache it. Real data or
+   *  nothing: unusable/missing rows simply leave the market unknown. */
+  private async ensureMarketData(marketId: string): Promise<void> {
+    if (this.markets.has(marketId) || this.marketFetchInFlight.has(marketId)) return;
+    this.marketFetchInFlight.add(marketId);
+    try {
+      const url = `${this.cfg.gamma_api_url}/markets?condition_ids=${encodeURIComponent(marketId)}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) throw new Error(`gamma HTTP ${res.status}`);
+      const rows = (await res.json()) as Array<Record<string, unknown>>;
+      const m = rows[0];
+      if (!m) return;
+
+      const parseNum = (v: unknown): number => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : NaN;
+      };
+      const parseArr = (v: unknown): string[] => {
+        if (Array.isArray(v)) return v.map(String);
+        if (typeof v === 'string') {
+          try {
+            const j: unknown = JSON.parse(v);
+            return Array.isArray(j) ? j.map(String) : [];
+          } catch {
+            return [];
+          }
+        }
+        return [];
+      };
+
+      const outcomes = parseArr(m.outcomes);
+      const prices = parseArr(m.outcomePrices).map(parseNum);
+      const tokens = parseArr(m.clobTokenIds);
+      if (outcomes.length < 2 || prices.length < 2 || tokens.length < 2) return;
+      if (!prices.slice(0, 2).every(Number.isFinite)) return;
+
+      const bid = parseNum(m.bestBid);
+      const ask = parseNum(m.bestAsk);
+      const hasQuote = Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > bid;
+      const mid = hasQuote ? (bid + ask) / 2 : prices[0];
+
+      this.markets.set(marketId, {
+        marketId,
+        question: String(m.question ?? ''),
+        slug: String(m.slug ?? ''),
+        outcomes,
+        outcomePrices: prices,
+        clobTokenIds: tokens,
+        midPrice: Number(mid.toFixed(4)),
+        bid: hasQuote ? bid : Number(mid.toFixed(4)),
+        ask: hasQuote ? ask : Number(mid.toFixed(4)),
+        spread: hasQuote ? Number((ask - bid).toFixed(4)) : 0,
+        volume24h: parseNum(m.volume24hr) || 0,
+        liquidity: parseNum(m.liquidityNum) || 0,
+        timestamp: Date.now(),
+      });
+      logger.info(
+        { marketId, question: String(m.question ?? '').slice(0, 60) },
+        '[copy_trade] whale market fetched from gamma',
+      );
+    } catch (err) {
+      logger.warn(
+        { marketId, err: (err as Error).message },
+        '[copy_trade] gamma market fetch failed — signal will skip sizing this tick',
+      );
+    } finally {
+      this.marketFetchInFlight.delete(marketId);
+    }
   }
 
   /* ━━━━━━━━━━━━━━ Whale Exit Detection ━━━━━━━━━━━━━━ */
@@ -792,6 +881,7 @@ export class CopyTradeStrategy extends BaseStrategy {
       whale_addresses: arr(raw.whale_addresses, d.whale_addresses),
       copy_mode: (raw.copy_mode as 'mirror' | 'inverse') ?? d.copy_mode,
       data_api_url: (raw.data_api_url as string) ?? d.data_api_url,
+      gamma_api_url: (raw.gamma_api_url as string) ?? d.gamma_api_url,
       poll_interval_seconds: (raw.poll_interval_seconds as number) ?? d.poll_interval_seconds,
       max_polls_per_tick: (raw.max_polls_per_tick as number) ?? d.max_polls_per_tick,
       max_trade_age_seconds: (raw.max_trade_age_seconds as number) ?? d.max_trade_age_seconds,
