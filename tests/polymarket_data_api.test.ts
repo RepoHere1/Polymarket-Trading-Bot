@@ -4,6 +4,7 @@ import {
   fetchAllV2Trades,
   toLegacyTrade,
   DataApiError,
+  nextDataApi429PenaltyMs,
 } from '../src/data/polymarket_data_api';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -154,5 +155,65 @@ describe('DataApiError', () => {
     const err = new DataApiError('boom', 410);
     expect(err.status).toBe(410);
     expect(err.message).toContain('boom');
+  });
+});
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Process-wide data-API budget (token bucket + 429 penalty +
+   in-flight coalescing). The limiter's await path is disabled under
+   vitest (fetch is stubbed) — the pure penalty math and coalescing
+   behaviour are still fully exercised here.
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+describe('data-API budget', () => {
+  it('429 penalty doubles per hit, honours Retry-After, caps at 60 s', () => {
+    expect(nextDataApi429PenaltyMs(1_000, null)).toBe(2_000);
+    expect(nextDataApi429PenaltyMs(2_000, null)).toBe(4_000);
+    expect(nextDataApi429PenaltyMs(40_000, null)).toBe(60_000); // capped
+    expect(nextDataApi429PenaltyMs(1_000, 30)).toBe(30_000); // Retry-After wins when larger
+    expect(nextDataApi429PenaltyMs(1_000, 0)).toBe(2_000); // "0" never shrinks growth
+  });
+
+  it('coalesces concurrent identical requests into ONE HTTP call', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 20)); // keep both callers in flight
+      return okResponse({ data: [v2Row()], pagination: { next_cursor: null, has_more: false } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const [a, b] = await Promise.all([
+      fetchV2TradesPage('https://data-api.test', { user: '0xabc' }),
+      fetchV2TradesPage('https://data-api.test', { user: '0xabc' }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(a).toBe(b); // the exact same shared page object
+    expect(a.trades).toHaveLength(1);
+  });
+
+  it('sequential identical requests are NOT coalesced (fresh fetch each)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({ data: [], pagination: { next_cursor: null, has_more: false } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchV2TradesPage('https://data-api.test', { user: '0xabc' });
+    await fetchV2TradesPage('https://data-api.test', { user: '0xabc' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed shared request rejects every caller (no fake fallback)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 410,
+      headers: { get: () => null },
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const results = await Promise.allSettled([
+      fetchV2TradesPage('https://data-api.test', { user: '0xdead' }),
+      fetchV2TradesPage('https://data-api.test', { user: '0xdead' }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // one HTTP attempt chain, shared
+    expect(results[0].status).toBe('rejected');
+    expect(results[1].status).toBe('rejected');
   });
 });

@@ -12,6 +12,7 @@ import { consoleLog } from './console_log';
 import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
 import { CopyTradeStrategy } from '../strategies/copy_trading/copy_trade_strategy';
+import { getDataApiLimiterStats } from '../data/polymarket_data_api';
 
 /* ──────────────────────────────────────────────────────────────
    Strategy catalog — rich metadata used by the Strategies tab
@@ -495,7 +496,8 @@ function getStrategyCatalog(): StrategyCatalogEntry[] {
         { key: 'max_daily_volume_usd', label: 'Max Daily Volume', type: 'number', default: 2000, unit: 'USD', description: 'Daily volume cap across all copy trades', group: 'Sizing' },
         { key: 'max_open_positions', label: 'Max Open Positions', type: 'number', default: 10, description: 'Maximum concurrent positions', group: 'Sizing' },
         { key: 'poll_interval_seconds', label: 'Poll Interval', type: 'number', default: 30, unit: 'sec', description: 'Seconds between whale trade API polls', group: 'Polling' },
-        { key: 'max_trade_age_seconds', label: 'Max Trade Age', type: 'number', default: 300, unit: 'sec', description: 'Ignore whale trades older than this', group: 'Polling' },
+        { key: 'max_polls_per_tick', label: 'Whales Polled Per Tick', type: 'number', default: 25, description: 'Rotating window — keeps the tick inside the shared data-API budget', group: 'Polling' },
+        { key: 'max_trade_age_seconds', label: 'Max Trade Age', type: 'number', default: 900, unit: 'sec', description: 'Ignore whale trades older than this (must exceed worst-case rotation time)', group: 'Polling' },
         { key: 'min_trade_size_usd', label: 'Min Trade Size', type: 'number', default: 10, unit: 'USD', description: 'Ignore whale trades smaller than this', group: 'Polling' },
         { key: 'stop_loss_bps', label: 'Stop Loss', type: 'number', default: 500, unit: 'bps', description: 'Close position on this much loss', group: 'Exit' },
         { key: 'take_profit_bps', label: 'Take Profit', type: 'number', default: 300, unit: 'bps', description: 'Close position on this much profit', group: 'Exit' },
@@ -1779,6 +1781,14 @@ export class DashboardServer {
       } else {
         json(res, 404, { ok: false, error: `Address "${address}" not found` });
       }
+      return;
+    }
+
+    /* ─── JSON: live data-API budget state (token bucket + 429 penalty) ───
+       One honest choke point shared by every /v2/trades caller — see
+       src/data/polymarket_data_api.ts. */
+    if (path === '/api/data-api-limiter' && method === 'GET') {
+      json(res, 200, getDataApiLimiterStats());
       return;
     }
 

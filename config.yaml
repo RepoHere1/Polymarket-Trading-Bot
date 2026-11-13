@@ -183,7 +183,14 @@ strategy_config:
     data_api_url: https://data-api.polymarket.com
     # ── Polling ──
     poll_interval_seconds: 30
-    max_trade_age_seconds: 120
+    # Max whales polled per tick — a rotating window covers the rest on later
+    # ticks. Keeps /v2/trades inside the shared public-API budget (see
+    # src/data/polymarket_data_api.ts; override via DATA_API_RATE_LIMIT_RPS).
+    max_polls_per_tick: 25
+    # Whale fills older than this are ignored. With ~224 wired whales and a
+    # ~1 req/s shared data-API budget, a full rotation takes minutes — 900 s
+    # keeps detected fills copyable instead of silently stale-filtered.
+    max_trade_age_seconds: 900
     # ── Whale Filters ──
     min_trade_size_usd: 50
     max_trade_size_usd: 100000

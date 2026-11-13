@@ -105,10 +105,110 @@ export function toLegacyTrade(t: V2Trade): LegacyDataApiTrade | null {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/* ━━━━━━━━━━━━━━ Process-wide data-API budget ━━━━━━━━━━━━━━
+   Every /v2/trades caller in this process (whale scanner, whale ingestion,
+   whale candidates, copy-trade lanes) funnels through fetchV2TradesPage, so
+   this is the ONE honest choke point for the shared public host
+   (data-api.polymarket.com). Before this existed, two copy lanes swept
+   224 whales each every 30 s (~15 req/s sustained, more with retries),
+   429-storming the host and blinding every consumer — including the lanes
+   themselves (fetch errors were swallowed as empty pages, so NOTHING was
+   ever copied) and the scanner ("endpoint marked unhealthy" latch).
+   Budget: DATA_API_RATE_LIMIT_RPS sustained (default 1.1 ≈ the host budget
+   the pool has always assumed), burst 8, plus an exponential process-wide
+   penalty window after any 429/503 (Retry-After wins when larger).
+   Disabled under vitest — tests stub fetch and must not be throttled. */
+
+const DATA_API_RPS = (() => {
+  const n = Number(process.env.DATA_API_RATE_LIMIT_RPS ?? '');
+  return Number.isFinite(n) && n > 0 ? n : 1.1;
+})();
+const DATA_API_BURST = 8;
+const PENALTY_FLOOR_MS = 1_000;
+const PENALTY_CAP_MS = 60_000;
+const LIMITER_DISABLED = Boolean(process.env.VITEST);
+
+const limiterState = {
+  tokens: DATA_API_BURST,
+  lastRefillAt: Date.now(),
+  penaltyMs: PENALTY_FLOOR_MS,
+  penaltyUntil: 0,
+};
+
+/** Concurrent identical requests share one HTTP call (two copy lanes
+ *  polling the same whale in the same instant = one request, one budget
+ *  token). Sequential callers are never affected. */
+const inFlightPages = new Map<string, Promise<V2TradesPage>>();
+
+export interface DataApiLimiterStats {
+  rps: number;
+  burst: number;
+  tokens: number;
+  penaltyMs: number;
+  penaltyUntilInMs: number;
+  disabled: boolean;
+}
+
+function refillTokens(now = Date.now()): void {
+  const gained = ((now - limiterState.lastRefillAt) / 1000) * DATA_API_RPS;
+  limiterState.tokens = Math.min(DATA_API_BURST, limiterState.tokens + gained);
+  limiterState.lastRefillAt = now;
+}
+
+async function acquireDataApiSlot(): Promise<void> {
+  if (LIMITER_DISABLED) return;
+  for (;;) {
+    refillTokens();
+    const penaltyWait = limiterState.penaltyUntil - Date.now();
+    if (limiterState.tokens >= 1 && penaltyWait <= 0) {
+      limiterState.tokens -= 1;
+      return;
+    }
+    const waitMs = penaltyWait > 0
+      ? penaltyWait
+      : ((1 - limiterState.tokens) / DATA_API_RPS) * 1000;
+    await sleep(Math.max(25, waitMs));
+  }
+}
+
+/** Pure penalty growth — exported for unit tests. Doubles the previous
+ *  penalty (floor 1 s, cap 60 s) and never shrinks below Retry-After. */
+export function nextDataApi429PenaltyMs(prevMs: number, retryAfterSec: number | null): number {
+  const fromRetry = retryAfterSec !== null && retryAfterSec >= 0 ? retryAfterSec * 1000 : 0;
+  const doubled = Math.min(PENALTY_CAP_MS, Math.max(PENALTY_FLOOR_MS, prevMs * 2));
+  return Math.min(PENALTY_CAP_MS, Math.max(doubled, fromRetry));
+}
+
+function noteDataApiBusy(retryAfterSec: number | null): void {
+  limiterState.penaltyMs = nextDataApi429PenaltyMs(limiterState.penaltyMs, retryAfterSec);
+  limiterState.penaltyUntil = Math.max(limiterState.penaltyUntil, Date.now() + limiterState.penaltyMs);
+}
+
+function noteDataApiHealthy(): void {
+  limiterState.penaltyMs = PENALTY_FLOOR_MS;
+  limiterState.penaltyUntil = 0;
+}
+
+/** Observability for dashboards / probes. */
+export function getDataApiLimiterStats(): DataApiLimiterStats {
+  refillTokens();
+  return {
+    rps: DATA_API_RPS,
+    burst: DATA_API_BURST,
+    tokens: limiterState.tokens,
+    penaltyMs: limiterState.penaltyMs,
+    penaltyUntilInMs: Math.max(0, limiterState.penaltyUntil - Date.now()),
+    disabled: LIMITER_DISABLED,
+  };
+}
+
 /**
- * Fetch one page of /v2/trades. Retries 429/503 honouring Retry-After
- * (up to MAX_RETRIES), then throws DataApiError — callers decide how to
- * surface the failure (pool health, empty result for non-critical paths).
+ * Fetch one page of /v2/trades. Throttled by the process-wide budget above;
+ * concurrent identical requests coalesce into one HTTP call. Retries 429/503
+ * honouring Retry-After (up to MAX_RETRIES), then throws DataApiError —
+ * callers decide how to surface the failure (pool health, empty result for
+ * non-critical paths). The returned page object may be SHARED between
+ * concurrent callers: treat it as read-only.
  */
 export async function fetchV2TradesPage(
   baseUrl: string,
@@ -122,9 +222,26 @@ export async function fetchV2TradesPage(
   if (params.limit && params.limit > 0) url.searchParams.set('limit', String(params.limit));
   if (params.cursor) url.searchParams.set('cursor', params.cursor);
 
+  const key = url.toString();
+  const existing = inFlightPages.get(key);
+  if (existing) return existing;
+
+  const pending = fetchV2TradesPageInner(url, opts).finally(() => {
+    inFlightPages.delete(key);
+  });
+  inFlightPages.set(key, pending);
+  return pending;
+}
+
+async function fetchV2TradesPageInner(
+  url: URL,
+  opts: { timeoutMs?: number } = {},
+): Promise<V2TradesPage> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    /* Every HTTP attempt — including retries — consumes budget. */
+    await acquireDataApiSlot();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res: Response;
@@ -149,6 +266,7 @@ export async function fetchV2TradesPage(
         .filter((t): t is LegacyDataApiTrade => t !== null);
       const nextCursor = body.pagination?.next_cursor ?? null;
       const hasMore = body.pagination?.has_more === true && nextCursor !== null;
+      noteDataApiHealthy();
       return { trades, nextCursor, hasMore };
     }
 
@@ -157,6 +275,7 @@ export async function fetchV2TradesPage(
          only a missing/unparseable header falls back to the 5 s default. */
       const retryAfter = parseInt(res.headers.get('retry-after') ?? '', 10);
       const waitMs = (Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : 5) * 1000;
+      noteDataApiBusy(Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : null);
       if (attempt < MAX_RETRIES) {
         logger.warn({ status: res.status, waitMs, path: url.pathname }, 'Data API v2 busy - backing off');
         await sleep(waitMs);

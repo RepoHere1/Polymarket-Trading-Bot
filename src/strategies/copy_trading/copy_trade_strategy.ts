@@ -37,7 +37,13 @@ export interface CopyTradeConfig {
   /* ── Polling ── */
   /** How often to poll for new whale trades (seconds) */
   poll_interval_seconds: number;
-  /** Max age of a whale trade to still copy (seconds) */
+  /** Max whales polled per tick — a rotating window covers the rest on
+   *  later ticks. Keeps each tick inside the shared data-API budget
+   *  (src/data/polymarket_data_api.ts). <=0 = poll everything each tick. */
+  max_polls_per_tick: number;
+  /** Max age of a whale trade to still copy (seconds) — must exceed the
+   *  worst-case rotation time of the whale universe, or throttled sweeps
+   *  silently discard every fill as stale. */
   max_trade_age_seconds: number;
 
   /* ── Whale Filters ── */
@@ -104,7 +110,8 @@ export const DEFAULT_COPY_TRADE_CONFIG: CopyTradeConfig = {
   copy_mode: 'mirror',
   data_api_url: 'https://data-api.polymarket.com',
   poll_interval_seconds: 30,
-  max_trade_age_seconds: 120,
+  max_polls_per_tick: 25,
+  max_trade_age_seconds: 600,
   min_trade_size_usd: 50,
   max_trade_size_usd: 100_000,
   min_whale_win_rate: 0.50,
@@ -192,6 +199,9 @@ export class CopyTradeStrategy extends BaseStrategy {
   /** Maps marketId → whale address, populated in sizePositions for notifyFill lookup */
   private recentWhaleMap = new Map<string, string>();
   private lastPollAt = 0;
+  /** Rotating poll cursor — index into whale_addresses where the next
+   *  tick's window starts (keeps per-tick bursts inside the API budget). */
+  private pollCursor = 0;
   private totalDailyVolumeUsd = 0;
   private dailyVolumeResetAt = 0;
   private cumulativePnlBps = 0;
@@ -229,6 +239,16 @@ export class CopyTradeStrategy extends BaseStrategy {
       sizeMode: this.cfg.size_mode,
     }, 'Copy Trade strategy initialised');
     consoleLog.info('STRATEGY', `[copy_trade] Following ${this.cfg.whale_addresses.length} whale(s) in ${this.cfg.copy_mode} mode`);
+    if (this.cfg.whale_addresses.length > this.pollCap()) {
+      consoleLog.info('STRATEGY', `[copy_trade] Rotating poll window: ${this.pollCap()} of ${this.cfg.whale_addresses.length} whales per tick (shared data-API budget)`);
+    }
+  }
+
+  /** Whales polled per tick — the rotating window size. */
+  private pollCap(): number {
+    const n = this.cfg.whale_addresses.length;
+    if (this.cfg.max_polls_per_tick <= 0 || this.cfg.max_polls_per_tick >= n) return n;
+    return this.cfg.max_polls_per_tick;
   }
 
   /* ━━━━━━━━━━━━━━ Timer — Poll for whale trades ━━━━━━━━━━━━━━ */
@@ -247,12 +267,19 @@ export class CopyTradeStrategy extends BaseStrategy {
       return;
     }
 
-    // Poll each whale address
-    for (const address of this.cfg.whale_addresses) {
+    // Poll whales in rotating windows so one tick never bursts the shared
+    // data-API budget (the 2026-11-12 429 storm blinded every lane).
+    const universe = this.cfg.whale_addresses;
+    const cap = this.pollCap();
+    let polled = 0;
+
+    for (let i = 0; i < universe.length && polled < cap; i++) {
+      const address = universe[(this.pollCursor + i) % universe.length];
       const perf = this.whalePerf.get(address.toLowerCase());
       if (perf && now < perf.pausedUntil) {
-        continue; // whale-specific cooldown
+        continue; // whale-specific cooldown — no request, no budget slot
       }
+      polled++; // this whale costs one data-API request, success or failure
 
       try {
         const trades = await this.fetchWhaleTrades(address);
@@ -280,6 +307,10 @@ export class CopyTradeStrategy extends BaseStrategy {
         logger.warn({ err, address }, '[copy_trade] Failed to poll whale trades');
       }
     }
+
+    /* Resume after the last whale actually polled; skipped (paused) whales
+       are picked up again on the next full rotation. */
+    this.pollCursor = (this.pollCursor + polled) % Math.max(1, universe.length);
 
     // Prune old seen-trade IDs (keep last 10,000)
     if (this.seenTradeIds.size > 10_000) {
@@ -762,6 +793,7 @@ export class CopyTradeStrategy extends BaseStrategy {
       copy_mode: (raw.copy_mode as 'mirror' | 'inverse') ?? d.copy_mode,
       data_api_url: (raw.data_api_url as string) ?? d.data_api_url,
       poll_interval_seconds: (raw.poll_interval_seconds as number) ?? d.poll_interval_seconds,
+      max_polls_per_tick: (raw.max_polls_per_tick as number) ?? d.max_polls_per_tick,
       max_trade_age_seconds: (raw.max_trade_age_seconds as number) ?? d.max_trade_age_seconds,
       min_trade_size_usd: (raw.min_trade_size_usd as number) ?? d.min_trade_size_usd,
       max_trade_size_usd: (raw.max_trade_size_usd as number) ?? d.max_trade_size_usd,

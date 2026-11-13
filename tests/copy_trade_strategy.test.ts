@@ -766,3 +766,72 @@ describe('CopyTradeStrategy — Edge Cases', () => {
     expect(() => s.shutdown()).not.toThrow();
   });
 });
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   10. ROTATING POLL WINDOW (shared data-API budget)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+describe('CopyTradeStrategy — Rotating poll window', () => {
+  const WHALE_C = '0xcccccccccccccccccccccccccccccccccccccccc';
+  const WHALE_D = '0xdddddddddddddddddddddddddddddddddddddddd';
+  const WHALE_E = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+
+  function emptyPage(): { data: unknown[]; pagination: { next_cursor: null; has_more: boolean } } {
+    return { data: [], pagination: { next_cursor: null, has_more: false } };
+  }
+
+  it('covers the universe across ticks in windows, then wraps', async () => {
+    const s = createStrategy({
+      whale_addresses: [WHALE_A, WHALE_B, WHALE_C, WHALE_D, WHALE_E],
+      max_polls_per_tick: 2,
+      poll_interval_seconds: 0,
+    });
+    fetchMock.mockResolvedValue({ ok: true, json: async () => emptyPage() });
+
+    await s.onTimer(); // window 1: A, B
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`user=${WHALE_A}`);
+    expect(String(fetchMock.mock.calls[1][0])).toContain(`user=${WHALE_B}`);
+    fetchMock.mockClear();
+
+    await s.onTimer(); // window 2: C, D
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`user=${WHALE_C}`);
+    expect(String(fetchMock.mock.calls[1][0])).toContain(`user=${WHALE_D}`);
+    fetchMock.mockClear();
+
+    await s.onTimer(); // window 3: E, then wraps to A within the tick
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`user=${WHALE_E}`);
+    expect(String(fetchMock.mock.calls[1][0])).toContain(`user=${WHALE_A}`);
+    fetchMock.mockClear();
+
+    await s.onTimer(); // window 4 continues the rotation: B, C
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`user=${WHALE_B}`);
+    expect(String(fetchMock.mock.calls[1][0])).toContain(`user=${WHALE_C}`);
+  });
+
+  it('max_polls_per_tick <= 0 disables rotation (polls every whale each tick)', async () => {
+    const s = createStrategy({
+      whale_addresses: [WHALE_A, WHALE_B],
+      max_polls_per_tick: 0,
+      poll_interval_seconds: 0,
+    });
+    fetchMock.mockResolvedValue({ ok: true, json: async () => emptyPage() });
+
+    await s.onTimer();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('cap larger than the universe polls everything in one tick', async () => {
+    const s = createStrategy({
+      whale_addresses: [WHALE_A, WHALE_B],
+      max_polls_per_tick: 25,
+      poll_interval_seconds: 0,
+    });
+    fetchMock.mockResolvedValue({ ok: true, json: async () => emptyPage() });
+
+    await s.onTimer();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
