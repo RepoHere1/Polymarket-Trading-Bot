@@ -1314,21 +1314,24 @@ export class DashboardServer {
           });
           return;
         }
+        /* OPERATOR LAW (2026-11-12): lane creation is NEVER blocked by the
+           account's buying power — the operator sets ANY budget; the STOP
+           button is the safety zone. The real balance is still read for the
+           receipt and the truth is logged (warnings, never refusal), and
+           order time still floors every lane at the account's actual buying
+           power — spendable = min(buying power, budget − spent) — so an
+           over-subscribed lane set simply shares what the account really
+           has. Nothing here can spend money that does not exist. */
         const balance = await this.walletManager.getLiveAccountBalance(parentWalletId);
-        if (balance === null) {
-          json(res, 503, {
-            ok: false,
-            error: `Could not read the real balance of "${parentWalletId}" from polymarket.us (credentials or API issue) — refusing to create the lane. Try again.`,
-          });
-          return;
-        }
         const committed = this.walletManager.getLiveLanes(parentWalletId).reduce((sum, l) => sum + l.budget, 0);
-        if (committed + capital > balance) {
-          json(res, 400, {
-            ok: false,
-            error: `Lane budget $${capital} + existing lanes $${committed.toFixed(2)} exceeds the account's real buying power $${balance.toFixed(2)}. Lower this budget or delete a lane.`,
-          });
-          return;
+        if (balance === null) {
+          console.warn(
+            `[live-lane] account balance unreadable — creating lane "${walletId}" anyway (operator law 2026-11-12: budgets are never blocked). Existing lanes commit $${committed.toFixed(2)}.`,
+          );
+        } else if (committed + capital > balance) {
+          console.warn(
+            `[live-lane] lanes over-subscribed: new $${capital} + existing $${committed.toFixed(2)} vs real buying power $${balance.toFixed(2)} — creating anyway (operator law 2026-11-12: the STOP button is the safety zone).`,
+          );
         }
         const lane = this.walletManager.createLiveLaneWallet(
           parentWalletId,
@@ -1350,7 +1353,7 @@ export class DashboardServer {
         this.store().clearTombstone(walletId); // a fresh create always outranks an old operator delete
         json(res, 201, {
           ok: true,
-          message: `LIVE lane "${walletId}" created on account "${parentWalletId}" (${strategy}, budget $${capital} of $${balance.toFixed(2)} buying power). The lane can never spend past its budget — keep the parent paused. Orders stay preview-only until POLYMARKET_DRY_RUN=false.`,
+          message: `LIVE lane "${walletId}" created on account "${parentWalletId}" (${strategy}, budget $${capital}${balance !== null ? ` of $${balance.toFixed(2)} buying power` : ''}). The lane can never spend past its budget — keep the parent paused. Orders stay preview-only until POLYMARKET_DRY_RUN=false.`,
         });
         return;
       }
@@ -1998,8 +2001,8 @@ export class DashboardServer {
        Operator action from the Copy Trading tab: creates a LIVE_LANE on the
        one polymarket.us account that copies the SAME whale set, with its own
        budget (LIVE ALLOTTED) and its own mandatory ON/OFF button. Mirrors the
-       POST /api/wallets LIVE_LANE creation gates exactly (parent paused,
-       real buying power read, Σ lane budgets ≤ balance). */
+       POST /api/wallets LIVE_LANE creation law (parent paused; budgets are
+       the operator's call — creation is NEVER blocked by buying power). */
     if (path === '/api/copy-links/promote-live' && method === 'POST') {
       const body = await readBody(req);
       const walletId = ((body.walletId as string) || '').trim();
@@ -2030,15 +2033,20 @@ export class DashboardServer {
         json(res, 409, { ok: false, error: `Pause the account wallet "${parent.walletId}" first (\u23F8 on its card). An account wallet either trades itself OR hosts lanes — never both.` });
         return;
       }
+      /* OPERATOR LAW (2026-11-12): twin creation is NEVER blocked by the
+         account's buying power — any budget, the STOP button is the safety
+         zone. Truth still logged; order time still floors spend at the
+         account's real buying power. */
       const balance = await this.walletManager.getLiveAccountBalance(parent.walletId);
-      if (balance === null) {
-        json(res, 503, { ok: false, error: `Could not read the real balance of "${parent.walletId}" from polymarket.us — refusing to create the twin. Try again.` });
-        return;
-      }
       const committed = this.walletManager.getLiveLanes(parent.walletId).reduce((sum, l) => sum + l.budget, 0);
-      if (committed + budget > balance) {
-        json(res, 400, { ok: false, error: `Twin budget $${budget} + existing lanes $${committed.toFixed(2)} exceeds the account's real buying power $${balance.toFixed(2)}. Lower the budget or delete a lane.` });
-        return;
+      if (balance === null) {
+        console.warn(
+          `[live-twin] account balance unreadable — creating twin "${twinId}" anyway (operator law 2026-11-12: budgets are never blocked). Existing lanes commit $${committed.toFixed(2)}.`,
+        );
+      } else if (committed + budget > balance) {
+        console.warn(
+          `[live-twin] lanes over-subscribed: new $${budget} + existing $${committed.toFixed(2)} vs real buying power $${balance.toFixed(2)} — creating anyway (operator law 2026-11-12: the STOP button is the safety zone).`,
+        );
       }
       const paperInst = this.engine?.getRunnerStrategy(walletId);
       const whales = paperInst instanceof CopyTradeStrategy ? paperInst.getWhaleAddresses() : [];
@@ -2074,7 +2082,7 @@ export class DashboardServer {
       json(res, 201, {
         ok: true,
         twinId,
-        message: `LIVE twin "${twinId}" created on account "${parent.walletId}" — budget $${budget} of $${balance.toFixed(2)} buying power, copying the same ${whales.length} whale(s). Its ON/OFF button is on its card in the REAL MONEY section. Orders stay preview-only until the bot is armed.`,
+        message: `LIVE twin "${twinId}" created on account "${parent.walletId}" — budget $${budget}${balance !== null ? ` of $${balance.toFixed(2)} buying power` : ''}, copying the same ${whales.length} whale(s). Its ON/OFF button is on its card in the REAL MONEY section. Orders stay preview-only until the bot is armed.`,
       });
       return;
     }
